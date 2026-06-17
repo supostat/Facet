@@ -1,0 +1,11 @@
+{
+  "name": "facet",
+  "private": true,
+  "version": "0.0.0",
+  "engines": {
+    "node": ">=24.10"
+  },
+  "scripts": {
+    "test": "zig build test"
+  }
+}

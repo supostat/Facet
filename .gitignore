@@ -1,0 +1,24 @@
+
+
+# dev-workflow (session data)
+.dev-vault/daily/
+.dev-vault/branches/
+.dev-vault/.intelligence.json
+# zig (build artifacts)
+.zig-cache/
+zig-out/
+# dev-workflow (stack-detected)
+.DS_Store
+*.swp
+*.swo
+*~
+coverage/
+.env
+.env.*
+.engram/
+.claude
+.mcp.json
+CLAUDE.md
+.vscode
+.dev-vault
+docs
