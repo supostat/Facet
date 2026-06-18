@@ -39,6 +39,9 @@ struct RendererBench {
             ("sdf_reference_rects.png", Instance.referenceScene),
             ("sdf_radius_zero.png", Instance.radiusZeroScene),
             ("sdf_radius_half_side.png", Instance.radiusHalfSideScene),
+            ("phase-3-shadow.png", Instance.shadowScene),
+            ("phase-3-border.png", Instance.borderScene),
+            ("phase-3-combined.png", Instance.combinedScene),
         ]
 
         for golden in goldens {
@@ -203,6 +206,9 @@ private final class SceneEditor {
     private static let sizeStep: Float = 10
     private static let radiusStep: Float = 4
     private static let colorStep: Float = 0.05
+    private static let offsetStep: Float = 4
+    private static let blurStep: Float = 4
+    private static let borderStep: Float = 2
 
     init(instances: [Instance]) {
         precondition(!instances.isEmpty, "The bench scene must start with at least one instance")
@@ -226,6 +232,18 @@ private final class SceneEditor {
         case "R": adjust(\.colorR, by: -Self.colorStep, clampUnit: true); return true
         case "G": adjust(\.colorG, by: -Self.colorStep, clampUnit: true); return true
         case "B": adjust(\.colorB, by: -Self.colorStep, clampUnit: true); return true
+        case "j": adjust(\.shadowOffsetX, by: -Self.offsetStep); return true
+        case "l": adjust(\.shadowOffsetX, by: Self.offsetStep); return true
+        case "i": adjust(\.shadowOffsetY, by: -Self.offsetStep); return true
+        case "k": adjust(\.shadowOffsetY, by: Self.offsetStep); return true
+        case "[": adjust(\.shadowBlurRadius, by: -Self.blurStep); return true
+        case "]": adjust(\.shadowBlurRadius, by: Self.blurStep); return true
+        case "o": adjust(\.shadowColorA, by: Self.colorStep, clampUnit: true); return true
+        case "O": adjust(\.shadowColorA, by: -Self.colorStep, clampUnit: true); return true
+        case "t": adjust(\.borderThickness, by: Self.borderStep); return true
+        case "T": adjust(\.borderThickness, by: -Self.borderStep); return true
+        case "n": adjust(\.borderColorA, by: Self.colorStep, clampUnit: true); return true
+        case "N": adjust(\.borderColorA, by: -Self.colorStep, clampUnit: true); return true
         case "0": resetSelected(); return true
         default: return false
         }
@@ -240,6 +258,11 @@ private final class SceneEditor {
               A / D     shrink / grow width
               - / =     shrink / grow corner radius
               r/g/b     raise red / green / blue   (Shift to lower)
+              i/j/k/l   nudge shadow offset up / left / down / right
+              [ / ]     shrink / grow shadow blur radius
+              o / O     raise / lower shadow alpha
+              t / T     grow / shrink border thickness
+              n / N     raise / lower border alpha
               0         reset the selected instance to its reference value
             \(instances.count) instances loaded; editing #\(selection).
             """

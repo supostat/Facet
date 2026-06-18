@@ -10,13 +10,26 @@ enum InstanceType: UInt32 {
 // One GPU instance: a flat, behavior-free value with a fixed C-compatible field
 // order. The field order IS the Р13 contract — the MSL `struct Instance` in
 // sdf.metal mirrors it field-for-field, and a future Zig `extern struct` will
-// mirror it again. Nine Float fields followed by one UInt32 give a 40-byte
-// stride with no trailing padding, so the array uploads as a packed buffer.
+// mirror it again. The layout is 21 Float fields with one UInt32 (`type`) wedged
+// at field 10, giving an 88-byte stride with no trailing padding, so the array
+// uploads as a packed buffer.
+//
+// The first ten fields (offsets 0..36) are the Phase 2 body: positionX/Y,
+// width/height, colorR/G/B/A, cornerRadius, type. Those offsets are frozen —
+// shadow and border were APPENDED after `type` so Phase 2 goldens stay
+// byte-identical. The trailing twelve floats (offsets 40..84) are the Phase 3
+// shadow + border: shadowOffsetX/Y, shadowBlurRadius, shadowColorR/G/B/A,
+// borderThickness, borderColorR/G/B/A. Their defaults are inert — shadowColorA
+// 0, borderThickness 0, blur 0, offset 0 — so a Phase 2 instance composites
+// exactly as before (no shadow contribution, border band collapses to nothing,
+// quad is not inflated).
 //
 // Geometry is expressed in drawable pixels with a top-left origin: positionX/Y
 // is the rectangle center, width/height its full extent. Color is
-// straight-alpha RGBA in [0, 1]; the shader premultiplies. cornerRadius is in
-// pixels and is clamped to half the shorter side by the shader.
+// straight-alpha RGBA in [0, 1]; the shader premultiplies. cornerRadius and
+// borderThickness are in pixels and are clamped to half the shorter side by the
+// shader. shadowOffset shifts the shadow silhouette in pixels; shadowBlurRadius
+// is the soft falloff half-width; shadowColor is straight-alpha RGBA.
 struct Instance {
     var positionX: Float
     var positionY: Float
@@ -28,13 +41,30 @@ struct Instance {
     var colorA: Float
     var cornerRadius: Float
     var type: UInt32
+    var shadowOffsetX: Float
+    var shadowOffsetY: Float
+    var shadowBlurRadius: Float
+    var shadowColorR: Float
+    var shadowColorG: Float
+    var shadowColorB: Float
+    var shadowColorA: Float
+    var borderThickness: Float
+    var borderColorR: Float
+    var borderColorG: Float
+    var borderColorB: Float
+    var borderColorA: Float
 
     init(
         center: (x: Float, y: Float),
         size: (width: Float, height: Float),
         color: (r: Float, g: Float, b: Float, a: Float),
         cornerRadius: Float,
-        type: InstanceType = .sdfRoundedRect
+        type: InstanceType = .sdfRoundedRect,
+        shadowOffset: (x: Float, y: Float) = (0, 0),
+        shadowBlurRadius: Float = 0,
+        shadowColor: (r: Float, g: Float, b: Float, a: Float) = (0, 0, 0, 0),
+        borderThickness: Float = 0,
+        borderColor: (r: Float, g: Float, b: Float, a: Float) = (0, 0, 0, 0)
     ) {
         positionX = center.x
         positionY = center.y
@@ -46,6 +76,18 @@ struct Instance {
         colorA = color.a
         self.cornerRadius = cornerRadius
         self.type = type.rawValue
+        shadowOffsetX = shadowOffset.x
+        shadowOffsetY = shadowOffset.y
+        self.shadowBlurRadius = shadowBlurRadius
+        shadowColorR = shadowColor.r
+        shadowColorG = shadowColor.g
+        shadowColorB = shadowColor.b
+        shadowColorA = shadowColor.a
+        self.borderThickness = borderThickness
+        borderColorR = borderColor.r
+        borderColorG = borderColor.g
+        borderColorB = borderColor.b
+        borderColorA = borderColor.a
     }
 
     // Hardcoded scene for the windowed app and the snapshot golden (§0a:
@@ -117,6 +159,53 @@ struct Instance {
             size: (width: 420, height: 260),
             color: (r: 0.30, g: 0.85, b: 0.45, a: 1.0),
             cornerRadius: 0
+        ),
+    ]
+
+    // Single opaque light card casting a soft, offset drop shadow — exercises the
+    // shadow underlay alone (no border). The offset+blur extent reaches well
+    // beyond the body so the soft falloff and the occlusion-by-opaque-fill are
+    // both visible. Body halfSize is (180, 110).
+    static let shadowScene: [Instance] = [
+        Instance(
+            center: (x: 512, y: 320),
+            size: (width: 360, height: 220),
+            color: (r: 0.85, g: 0.85, b: 0.88, a: 1.0),
+            cornerRadius: 32,
+            shadowOffset: (x: 24, y: 24),
+            shadowBlurRadius: 28,
+            shadowColor: (r: 0.0, g: 0.0, b: 0.0, a: 0.6)
+        ),
+    ]
+
+    // Single blue card with a thick opaque white border — exercises the border
+    // band alone (no shadow). The 16px band, blue interior, and clear exterior
+    // give three distinct analytic spot regions.
+    static let borderScene: [Instance] = [
+        Instance(
+            center: (x: 512, y: 320),
+            size: (width: 360, height: 220),
+            color: (r: 0.20, g: 0.55, b: 0.95, a: 1.0),
+            cornerRadius: 40,
+            borderThickness: 16,
+            borderColor: (r: 1.0, g: 1.0, b: 1.0, a: 1.0)
+        ),
+    ]
+
+    // Shadow AND border on one blue card — exercises the full composite. The
+    // opaque body occludes the shadow within the border band, so a band pixel
+    // resolves to the border color, proving the shadow→fill→border order.
+    static let combinedScene: [Instance] = [
+        Instance(
+            center: (x: 512, y: 320),
+            size: (width: 360, height: 220),
+            color: (r: 0.20, g: 0.55, b: 0.95, a: 1.0),
+            cornerRadius: 40,
+            shadowOffset: (x: 24, y: 24),
+            shadowBlurRadius: 28,
+            shadowColor: (r: 0.0, g: 0.0, b: 0.0, a: 0.6),
+            borderThickness: 16,
+            borderColor: (r: 1.0, g: 1.0, b: 1.0, a: 1.0)
         ),
     ]
 }

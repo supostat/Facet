@@ -44,6 +44,15 @@ const sdf_test_sources = [_][]const u8{
     "tests/snapshots/RendererSnapshotTests.swift",
 };
 
+// The Phase 3 golden + analytic spot-assert test for the shadow/border path.
+const phase3_test_sources = [_][]const u8{
+    "src/platform/Instance.swift",
+    "src/platform/MetallibLocator.swift",
+    "src/platform/Renderer.swift",
+    "tests/snapshots/PngImage.swift",
+    "tests/snapshots/Phase3ShadowBorderTests.swift",
+};
+
 // The bench harness: a live editable-window eye-check plus the headless
 // --write-reference golden generator. Reuses the production windowing types.
 const bench_sources = [_][]const u8{
@@ -83,9 +92,14 @@ pub fn build(b: *std.Build) void {
     const sdf_test_run = runBinary(b, sdf_test_binary, metallib, true);
     sdf_test_run.expectExitCode(0);
 
+    const phase3_test_binary = compileSwift(b, "phase3-shadow-border-test", &phase3_test_sources, .debug);
+    const phase3_test_run = runBinary(b, phase3_test_binary, metallib, true);
+    phase3_test_run.expectExitCode(0);
+
     const test_step = b.step("test", "Run the headless clear-frame and SDF snapshot tests (Metal validation ON)");
     test_step.dependOn(&clear_test_run.step);
     test_step.dependOn(&sdf_test_run.step);
+    test_step.dependOn(&phase3_test_run.step);
 }
 
 const Optimization = enum { debug, release };
