@@ -11,7 +11,7 @@ struct AppMain {
         application.setActivationPolicy(.regular)
         application.activate()
 
-        let window = Window()
+        let window = Window(metallibPath: MetallibLocator.resolve())
         window.show()
 
         application.run()

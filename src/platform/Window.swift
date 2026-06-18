@@ -9,13 +9,18 @@ import Metal
 final class Window: NSObject, NSWindowDelegate {
     private static let defaultContentSize = NSSize(width: 1024, height: 640)
 
+    // Hardcoded reference scene supplied to the renderer every frame (§0a: the
+    // renderer never builds a scene; this external supplier does). Removed when a
+    // real scene source arrives in a later phase.
+    private static let referenceScene = Instance.referenceScene
+
     private let window: NSWindow
     private let metalLayer: CAMetalLayer
     private let renderer: Renderer
     private let frameLoop: FrameLoop
 
-    override init() {
-        renderer = Renderer()
+    init(metallibPath: String) {
+        renderer = Renderer(metallibPath: metallibPath)
 
         metalLayer = CAMetalLayer()
         metalLayer.device = MTLCreateSystemDefaultDevice()
@@ -38,7 +43,11 @@ final class Window: NSObject, NSWindowDelegate {
 
         frameLoop = FrameLoop { [renderer, metalLayer] in
             guard let drawable = metalLayer.nextDrawable() else { return }
-            renderer.drawClearFrame(presentingTo: drawable, targetTexture: drawable.texture)
+            renderer.drawSdfFrame(
+                Self.referenceScene,
+                presentingTo: drawable,
+                targetTexture: drawable.texture
+            )
         }
 
         super.init()

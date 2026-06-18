@@ -7,14 +7,14 @@ struct CapturedFrame {
     let bgraPixels: [UInt8]
 }
 
-// Owns the Metal device and the single command queue, and draws one empty
-// clear pass per frame. Phase 1 builds no scene: the per-frame entry is shaped
-// so a later phase adds an external scene parameter and an instanced draw
-// without restructuring (the renderer is "given a target, draw it"; it never
-// builds the scene itself).
+// Owns the Metal device, the single command queue, the SDF render pipeline, the
+// loaded MTLLibrary, and a growable shared instance buffer. It is given a target
+// and an external array of Instances per frame and draws them as ONE instanced
+// draw call; it never builds a scene itself (Р2/КТ-1). An empty instance array
+// produces zero draws and a byte-exact clear, preserving the Phase-1 path.
 final class Renderer {
     // Channel values are exact multiples of 1/255, so the float->BGRA8 mapping
-    // is lossless and the snapshot test can assert exact bytes.
+    // is lossless and the clear-frame test can assert exact bytes.
     static let clearColor = MTLClearColor(
         red: 12.0 / 255.0,
         green: 18.0 / 255.0,
@@ -23,15 +23,22 @@ final class Renderer {
     )
 
     private static let drawablePixelFormat: MTLPixelFormat = .bgra8Unorm
+    private static let minimumInstanceCapacity = 16
 
     private let device: MTLDevice
     private let commandQueue: MTLCommandQueue
+    private let sdfPipelineState: MTLRenderPipelineState
 
-    // Machine-observable metric: incremented at the single commit() call site,
-    // asserted == 1 per frame by the snapshot/metric test.
+    private var instanceBuffer: MTLBuffer
+    private var instanceCapacity: Int
+
+    // Machine-observable metrics: committedFrameCount increments at the single
+    // commit() site; drawCallCount at the single drawPrimitives() site. The
+    // snapshot/metric test asserts both advance by exactly 1 per drawn frame.
     private(set) var committedFrameCount: Int = 0
+    private(set) var drawCallCount: Int = 0
 
-    init() {
+    init(metallibPath: String) {
         guard let device = MTLCreateSystemDefaultDevice() else {
             fatalError("Metal is unavailable: MTLCreateSystemDefaultDevice returned nil")
         }
@@ -40,23 +47,102 @@ final class Renderer {
         }
         self.device = device
         self.commandQueue = commandQueue
+
+        let library = Self.loadLibrary(device: device, path: metallibPath)
+        self.sdfPipelineState = Self.makeSdfPipelineState(device: device, library: library)
+
+        self.instanceCapacity = Self.minimumInstanceCapacity
+        guard let buffer = device.makeBuffer(
+            length: Self.minimumInstanceCapacity * MemoryLayout<Instance>.stride,
+            options: .storageModeShared
+        ) else {
+            fatalError("Failed to allocate the shared instance buffer")
+        }
+        self.instanceBuffer = buffer
     }
 
-    func drawClearFrame(presentingTo drawable: CAMetalDrawable, targetTexture: MTLTexture) {
-        encodeClear(into: targetTexture, presenting: drawable, waitForCompletion: false)
+    private static func loadLibrary(device: MTLDevice, path: String) -> MTLLibrary {
+        let url = URL(fileURLWithPath: path)
+        do {
+            return try device.makeLibrary(URL: url)
+        } catch {
+            fatalError("Failed to load Metal library at \(path): \(error)")
+        }
     }
 
-    func captureClearFrame(width: Int, height: Int) -> CapturedFrame {
+    private static func makeSdfPipelineState(
+        device: MTLDevice,
+        library: MTLLibrary
+    ) -> MTLRenderPipelineState {
+        guard let vertexFunction = library.makeFunction(name: "sdf_vertex") else {
+            fatalError("Metal library is missing the sdf_vertex function")
+        }
+        guard let fragmentFunction = library.makeFunction(name: "sdf_fragment") else {
+            fatalError("Metal library is missing the sdf_fragment function")
+        }
+
+        let descriptor = MTLRenderPipelineDescriptor()
+        descriptor.vertexFunction = vertexFunction
+        descriptor.fragmentFunction = fragmentFunction
+
+        let attachment = descriptor.colorAttachments[0]!
+        attachment.pixelFormat = drawablePixelFormat
+        // Premultiplied-alpha "over" blending: the fragment shader already
+        // multiplies rgb by alpha*coverage, so source uses .one.
+        attachment.isBlendingEnabled = true
+        attachment.rgbBlendOperation = .add
+        attachment.alphaBlendOperation = .add
+        attachment.sourceRGBBlendFactor = .one
+        attachment.sourceAlphaBlendFactor = .one
+        attachment.destinationRGBBlendFactor = .oneMinusSourceAlpha
+        attachment.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+
+        do {
+            return try device.makeRenderPipelineState(descriptor: descriptor)
+        } catch {
+            fatalError("Failed to create the SDF render pipeline state: \(error)")
+        }
+    }
+
+    func drawSdfFrame(
+        _ instances: [Instance],
+        presentingTo drawable: CAMetalDrawable,
+        targetTexture: MTLTexture
+    ) {
+        let drawableSize = SIMD2<Float>(Float(targetTexture.width), Float(targetTexture.height))
+        encodeSdf(
+            instances,
+            into: targetTexture,
+            drawableSize: drawableSize,
+            presenting: drawable,
+            waitForCompletion: false
+        )
+    }
+
+    func captureSdfFrame(_ instances: [Instance], width: Int, height: Int) -> CapturedFrame {
         let targetTexture = makeOffscreenTexture(width: width, height: height)
-        encodeClear(into: targetTexture, presenting: nil, waitForCompletion: true)
+        let drawableSize = SIMD2<Float>(Float(width), Float(height))
+        encodeSdf(
+            instances,
+            into: targetTexture,
+            drawableSize: drawableSize,
+            presenting: nil,
+            waitForCompletion: true
+        )
         return readBack(targetTexture)
     }
 
-    private func encodeClear(
+    private func encodeSdf(
+        _ instances: [Instance],
         into targetTexture: MTLTexture,
+        drawableSize: SIMD2<Float>,
         presenting drawable: CAMetalDrawable?,
         waitForCompletion: Bool
     ) {
+        if !instances.isEmpty {
+            uploadInstances(instances)
+        }
+
         let renderPass = MTLRenderPassDescriptor()
         renderPass.colorAttachments[0].texture = targetTexture
         renderPass.colorAttachments[0].loadAction = .clear
@@ -69,6 +155,20 @@ final class Renderer {
         guard let encoder = commandBuffer.makeRenderCommandEncoder(descriptor: renderPass) else {
             fatalError("Failed to create a render command encoder")
         }
+
+        if !instances.isEmpty {
+            var size = drawableSize
+            encoder.setRenderPipelineState(sdfPipelineState)
+            encoder.setVertexBuffer(instanceBuffer, offset: 0, index: 0)
+            encoder.setVertexBytes(&size, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+            encoder.drawPrimitives(
+                type: .triangle,
+                vertexStart: 0,
+                vertexCount: 6,
+                instanceCount: instances.count
+            )
+            drawCallCount += 1
+        }
         encoder.endEncoding()
 
         if let drawable {
@@ -80,9 +180,33 @@ final class Renderer {
         if waitForCompletion {
             commandBuffer.waitUntilCompleted()
             if let error = commandBuffer.error {
-                fatalError("Clear-frame command buffer failed: \(error)")
+                fatalError("SDF command buffer failed: \(error)")
             }
         }
+    }
+
+    private func uploadInstances(_ instances: [Instance]) {
+        if instances.count > instanceCapacity {
+            growInstanceBuffer(toFit: instances.count)
+        }
+        instances.withUnsafeBytes { source in
+            instanceBuffer.contents().copyMemory(from: source.baseAddress!, byteCount: source.count)
+        }
+    }
+
+    private func growInstanceBuffer(toFit requiredCount: Int) {
+        var newCapacity = instanceCapacity
+        while newCapacity < requiredCount {
+            newCapacity *= 2
+        }
+        guard let buffer = device.makeBuffer(
+            length: newCapacity * MemoryLayout<Instance>.stride,
+            options: .storageModeShared
+        ) else {
+            fatalError("Failed to grow the shared instance buffer to \(newCapacity) instances")
+        }
+        instanceBuffer = buffer
+        instanceCapacity = newCapacity
     }
 
     private func makeOffscreenTexture(width: Int, height: Int) -> MTLTexture {

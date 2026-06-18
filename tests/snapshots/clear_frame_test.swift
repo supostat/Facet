@@ -1,7 +1,8 @@
 import Foundation
 import Metal
 
-// Snapshot + metric test for the Phase 1 clear-frame path.
+// Snapshot + metric test for the clear-frame path. An empty instance array means
+// zero draw calls, so the SDF path collapses to the bare clear pass.
 // No reference PNG: a clear pass with a known clearColor is fully reproducible,
 // so we assert directly against the exact clearColor BGRA8 bytes. The offscreen
 // texture has no colorspace and lives in shared storage on unified memory, so
@@ -24,7 +25,7 @@ func channelToByte(_ component: Double) -> UInt8 {
 @main
 struct ClearFrameTest {
     static func main() {
-        let renderer = Renderer()
+        let renderer = Renderer(metallibPath: MetallibLocator.resolve())
         runHappySquareCase(renderer)
         runNonSquareEdgeCase(renderer)
         runSingleCommitMetric(renderer)
@@ -49,21 +50,24 @@ func assertEveryPixelIsClearColor(_ frame: CapturedFrame) {
 }
 
 func runHappySquareCase(_ renderer: Renderer) {
-    let frame = renderer.captureClearFrame(width: 512, height: 512)
+    let frame = renderer.captureSdfFrame([], width: 512, height: 512)
     assertEveryPixelIsClearColor(frame)
 }
 
 func runNonSquareEdgeCase(_ renderer: Renderer) {
-    let frame = renderer.captureClearFrame(width: 1024, height: 300)
+    let frame = renderer.captureSdfFrame([], width: 1024, height: 300)
     precondition(frame.width == 1024, "width not honored")
     precondition(frame.height == 300, "height not honored")
     assertEveryPixelIsClearColor(frame)
 }
 
 func runSingleCommitMetric(_ renderer: Renderer) {
-    let before = renderer.committedFrameCount
-    _ = renderer.captureClearFrame(width: 64, height: 64)
-    let committedThisFrame = renderer.committedFrameCount - before
+    let commitsBefore = renderer.committedFrameCount
+    let drawsBefore = renderer.drawCallCount
+    _ = renderer.captureSdfFrame([], width: 64, height: 64)
+    let committedThisFrame = renderer.committedFrameCount - commitsBefore
+    let drawsThisFrame = renderer.drawCallCount - drawsBefore
     precondition(committedThisFrame == 1, "expected exactly one commit per frame, got \(committedThisFrame)")
-    print("commits=\(committedThisFrame)")
+    precondition(drawsThisFrame == 0, "empty instance list must issue zero draws, got \(drawsThisFrame)")
+    print("commits=\(committedThisFrame) draw_calls=\(drawsThisFrame)")
 }
