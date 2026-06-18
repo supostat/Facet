@@ -24,6 +24,7 @@ const app_sources = [_][]const u8{
     "src/platform/GlyphRasterizer.swift",
     "src/platform/Atlas.swift",
     "src/platform/AtlasInspector.swift",
+    "src/platform/TextLayout.swift",
     "src/platform/Renderer.swift",
     "src/platform/FrameLoop.swift",
     "src/platform/Window.swift",
@@ -39,6 +40,7 @@ const clear_test_sources = [_][]const u8{
     "src/platform/GlyphRasterizer.swift",
     "src/platform/Atlas.swift",
     "src/platform/AtlasInspector.swift",
+    "src/platform/TextLayout.swift",
     "src/platform/Renderer.swift",
     "tests/snapshots/clear_frame_test.swift",
 };
@@ -51,6 +53,7 @@ const sdf_test_sources = [_][]const u8{
     "src/platform/GlyphRasterizer.swift",
     "src/platform/Atlas.swift",
     "src/platform/AtlasInspector.swift",
+    "src/platform/TextLayout.swift",
     "src/platform/Renderer.swift",
     "tests/snapshots/PngImage.swift",
     "tests/snapshots/SnapshotComparator.swift",
@@ -65,6 +68,7 @@ const phase3_test_sources = [_][]const u8{
     "src/platform/GlyphRasterizer.swift",
     "src/platform/Atlas.swift",
     "src/platform/AtlasInspector.swift",
+    "src/platform/TextLayout.swift",
     "src/platform/Renderer.swift",
     "tests/snapshots/PngImage.swift",
     "tests/snapshots/SnapshotComparator.swift",
@@ -80,11 +84,13 @@ const bench_sources = [_][]const u8{
     "src/platform/GlyphRasterizer.swift",
     "src/platform/Atlas.swift",
     "src/platform/AtlasInspector.swift",
+    "src/platform/TextLayout.swift",
     "src/platform/Renderer.swift",
     "src/platform/FrameLoop.swift",
     "src/platform/Window.swift",
     "tests/snapshots/PngImage.swift",
     "tests/snapshots/ReferenceAtlas.swift",
+    "tests/snapshots/ReferenceText.swift",
     "harness/renderer-bench/AtlasViewer.swift",
     // Not named main.swift: swiftc treats a literal main.swift as top-level
     // code, which conflicts with the @main attribute on RendererBench.
@@ -120,11 +126,31 @@ const atlas_snapshot_test_sources = [_][]const u8{
     "src/platform/GlyphRasterizer.swift",
     "src/platform/Atlas.swift",
     "src/platform/AtlasInspector.swift",
+    "src/platform/TextLayout.swift",
     "src/platform/Renderer.swift",
     "tests/snapshots/PngImage.swift",
     "tests/snapshots/SnapshotComparator.swift",
     "tests/snapshots/ReferenceAtlas.swift",
     "tests/snapshots/AtlasSnapshotTests.swift",
+};
+
+// The Phase 5 text golden + metric test: the atlas + TextLayout + Renderer stack,
+// the shared comparator/PngImage, the shared ReferenceText scene definitions, and
+// TextSnapshotTests. Unlike the atlas tests it DOES construct a Renderer and the
+// glyph fragment branch samples the atlas texture, so it loads the metallib.
+const text_test_sources = [_][]const u8{
+    "src/platform/Instance.swift",
+    "src/platform/MetallibLocator.swift",
+    "src/platform/ShelfPacker.swift",
+    "src/platform/GlyphRasterizer.swift",
+    "src/platform/Atlas.swift",
+    "src/platform/AtlasInspector.swift",
+    "src/platform/TextLayout.swift",
+    "src/platform/Renderer.swift",
+    "tests/snapshots/PngImage.swift",
+    "tests/snapshots/SnapshotComparator.swift",
+    "tests/snapshots/ReferenceText.swift",
+    "tests/snapshots/TextSnapshotTests.swift",
 };
 
 pub fn build(b: *std.Build) void {
@@ -166,12 +192,19 @@ pub fn build(b: *std.Build) void {
     const atlas_snapshot_test_run = runBinaryWithoutMetallib(b, atlas_snapshot_test_binary, true);
     atlas_snapshot_test_run.expectExitCode(0);
 
+    // The text test constructs a Renderer and the glyph fragment branch samples
+    // the atlas texture, so it loads the metallib (unlike the atlas tests).
+    const text_test_binary = compileSwift(b, "text-snapshot-test", &text_test_sources, .debug);
+    const text_test_run = runBinary(b, text_test_binary, metallib, true);
+    text_test_run.expectExitCode(0);
+
     const test_step = b.step("test", "Run the headless clear-frame and SDF snapshot tests (Metal validation ON)");
     test_step.dependOn(&clear_test_run.step);
     test_step.dependOn(&sdf_test_run.step);
     test_step.dependOn(&phase3_test_run.step);
     test_step.dependOn(&atlas_test_run.step);
     test_step.dependOn(&atlas_snapshot_test_run.step);
+    test_step.dependOn(&text_test_run.step);
 }
 
 const Optimization = enum { debug, release };

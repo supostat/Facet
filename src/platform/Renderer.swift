@@ -29,11 +29,17 @@ final class Renderer {
     private let commandQueue: MTLCommandQueue
     private let sdfPipelineState: MTLRenderPipelineState
 
-    // The lazy glyph atlas, created and owned with the renderer's device. This
-    // phase only stands the atlas up (the bench atlas viewer and the snapshot
-    // test exercise it); no glyph pipeline is built here — that lands when a real
-    // glyph draw is issued, to avoid a dead unused-pipeline stub in production.
+    // The lazy glyph atlas, created and owned with the renderer's device. Text is
+    // drawn by the glyph branch of the single SDF pipeline (no separate glyph
+    // pipeline object), so the atlas texture is bound on every draw alongside the
+    // sampler below.
     let atlas: Atlas
+
+    // The linear/clampToEdge sampler the glyph fragment branch reads the R8 atlas
+    // through. Owned by the renderer because the atlas texture is bound on every
+    // draw and the fragment shader declares a sampler at index 0 even when only
+    // SDF instances are present (the bound sampler is simply never sampled then).
+    private let atlasSampler: MTLSamplerState
 
     private var instanceBuffer: MTLBuffer
     private var instanceCapacity: Int
@@ -57,6 +63,7 @@ final class Renderer {
         let library = Self.loadLibrary(device: device, path: metallibPath)
         self.sdfPipelineState = Self.makeSdfPipelineState(device: device, library: library)
         self.atlas = Atlas(device: device)
+        self.atlasSampler = Self.makeSampler(device: device)
 
         self.instanceCapacity = Self.minimumInstanceCapacity
         guard let buffer = device.makeBuffer(
@@ -75,6 +82,21 @@ final class Renderer {
         } catch {
             fatalError("Failed to load Metal library at \(path): \(error)")
         }
+    }
+
+    // Linear min/mag, clampToEdge on both axes — matches the bench AtlasViewer's
+    // sampler so the production glyph branch and the eye-check viewer sample the
+    // atlas identically.
+    private static func makeSampler(device: MTLDevice) -> MTLSamplerState {
+        let descriptor = MTLSamplerDescriptor()
+        descriptor.minFilter = .linear
+        descriptor.magFilter = .linear
+        descriptor.sAddressMode = .clampToEdge
+        descriptor.tAddressMode = .clampToEdge
+        guard let sampler = device.makeSamplerState(descriptor: descriptor) else {
+            fatalError("Failed to create the atlas sampler state")
+        }
+        return sampler
     }
 
     private static func makeSdfPipelineState(
@@ -168,6 +190,12 @@ final class Renderer {
             encoder.setRenderPipelineState(sdfPipelineState)
             encoder.setVertexBuffer(instanceBuffer, offset: 0, index: 0)
             encoder.setVertexBytes(&size, length: MemoryLayout<SIMD2<Float>>.stride, index: 1)
+            // The fragment shader declares a texture+sampler at index 0 for the
+            // glyph branch; Metal API Validation requires them bound on any draw,
+            // so they are set unconditionally even for an all-SDF frame (where the
+            // sampler is never read).
+            encoder.setFragmentTexture(atlas.texture, index: 0)
+            encoder.setFragmentSamplerState(atlasSampler, index: 0)
             encoder.drawPrimitives(
                 type: .triangle,
                 vertexStart: 0,

@@ -3,11 +3,14 @@ using namespace metal;
 
 // GPU mirror of the Swift `struct Instance` (Instance.swift). The field order is
 // the Р13 contract: the first ten fields (positionX..type) are the frozen Phase 2
-// body at offsets 0..36; the trailing twelve floats are the Phase 3 shadow +
-// border, appended after `type` so the body offsets never move. The full stride
-// is 88 bytes with no padding. Geometry is in drawable pixels, top-left origin;
-// color and shadowColor are straight-alpha RGBA. Inert defaults (shadowColorA 0,
-// borderThickness 0, blur 0, offset 0) reduce the composite exactly to Phase 2.
+// body at offsets 0..36; offsets 40..84 are the Phase 3 shadow + border; the
+// trailing four floats are the Phase 5 glyph atlas sub-rectangle, all appended
+// after `type` so the body offsets never move. The full stride is 104 bytes with
+// no padding. Geometry is in drawable pixels, top-left origin; color and
+// shadowColor are straight-alpha RGBA. Inert defaults (shadowColorA 0,
+// borderThickness 0, blur 0, offset 0, atlas rect 0) reduce the composite exactly
+// to Phase 2 and never take the glyph branch. For a glyph instance (type == 1u)
+// the atlasMin/Max U/V name the glyph rect in [0, 1] atlas texture coordinates.
 struct Instance {
     float positionX;
     float positionY;
@@ -31,6 +34,10 @@ struct Instance {
     float borderColorG;
     float borderColorB;
     float borderColorA;
+    float atlasMinU;
+    float atlasMinV;
+    float atlasMaxU;
+    float atlasMaxV;
 };
 
 struct VertexOut {
@@ -48,6 +55,10 @@ struct VertexOut {
     float4 shadowColor;
     float borderThickness;
     float4 borderColor;
+    // Phase 5: atlas texture coordinate for the glyph branch (zeroed on the SDF
+    // path), and the instance kind so the fragment selects the matching branch.
+    float2 texCoord;
+    uint type;
 };
 
 // Two triangles covering the unit quad in [-0.5, 0.5], wound for the default
@@ -81,13 +92,44 @@ vertex VertexOut sdf_vertex(
     const float2 halfSize = float2(instance.width, instance.height) * 0.5;
     const float2 shadowOffset = float2(instance.shadowOffsetX, instance.shadowOffsetY);
 
+    const float2 corner = quadCorners[vertex_id];
+    // Corner mapped from [-0.5, 0.5] into [0, 1] for texture-coordinate lerp.
+    const float2 cornerUV = corner + 0.5;
+
+    // Glyph branch: a non-inflated cell quad sampled from the atlas sub-rect. The
+    // cell center is positionX/Y; the quad spans the full cell with no shadow
+    // reach, and the SDF-only carry fields are zeroed so the fragment glyph branch
+    // reads nothing stale.
+    if (instance.type == 1u) {
+        const float2 localPosition = corner * (halfSize * 2.0);
+        const float2 pixel = float2(instance.positionX, instance.positionY) + localPosition;
+        const float ndcX = 2.0 * pixel.x / drawableSize.x - 1.0;
+        const float ndcY = 1.0 - 2.0 * pixel.y / drawableSize.y;
+        const float2 atlasMin = float2(instance.atlasMinU, instance.atlasMinV);
+        const float2 atlasMax = float2(instance.atlasMaxU, instance.atlasMaxV);
+
+        VertexOut out;
+        out.position = float4(ndcX, ndcY, 0.0, 1.0);
+        out.localPosition = float2(0.0);
+        out.halfSize = float2(0.0);
+        out.cornerRadius = 0.0;
+        out.color = float4(instance.colorR, instance.colorG, instance.colorB, instance.colorA);
+        out.shadowOffset = float2(0.0);
+        out.shadowBlurRadius = 0.0;
+        out.shadowColor = float4(0.0);
+        out.borderThickness = 0.0;
+        out.borderColor = float4(0.0);
+        out.texCoord = atlasMin + cornerUV * (atlasMax - atlasMin);
+        out.type = instance.type;
+        return out;
+    }
+
     // Inflate the quad by the shadow's reach so the soft, offset silhouette is
     // never clipped by the body-sized quad. Inert defaults leave inflation 0, so
     // the quad is byte-identical to Phase 2.
     const float2 inflation = float2(instance.shadowBlurRadius) + abs(shadowOffset);
     const float2 inflatedHalf = halfSize + inflation;
 
-    const float2 corner = quadCorners[vertex_id];
     const float2 localPosition = corner * (inflatedHalf * 2.0);
     const float2 pixel = float2(instance.positionX, instance.positionY) + localPosition;
 
@@ -113,10 +155,25 @@ vertex VertexOut sdf_vertex(
     out.borderThickness = min(instance.borderThickness, maxExtent);
     out.borderColor = float4(
         instance.borderColorR, instance.borderColorG, instance.borderColorB, instance.borderColorA);
+    out.texCoord = float2(0.0);
+    out.type = instance.type;
     return out;
 }
 
-fragment float4 sdf_fragment(VertexOut in [[stage_in]]) {
+fragment float4 sdf_fragment(
+    VertexOut in [[stage_in]],
+    texture2d<float> atlas [[texture(0)]],
+    sampler atlasSampler [[sampler(0)]]
+) {
+    // Glyph branch: the R8 atlas carries coverage in the red channel; the instance
+    // color tints it. Premultiplied output matches the renderer's
+    // .one / .oneMinusSourceAlpha blend, identical to the SDF path's output form.
+    if (in.type == 1u) {
+        const float coverage = atlas.sample(atlasSampler, in.texCoord).r;
+        const float alpha = in.color.a * coverage;
+        return float4(in.color.rgb * alpha, alpha);
+    }
+
     // Soft drop shadow: the same rounded-box silhouette, shifted by the offset
     // and feathered across the blur half-width. No fwidth — the blur radius is
     // the intended softness, independent of screen-space derivatives.

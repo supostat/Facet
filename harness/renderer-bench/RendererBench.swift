@@ -54,7 +54,16 @@ struct RendererBench {
             ("phase-3-combined.png", Instance.combinedScene),
         ]
 
-        for golden in goldens {
+        // Text scenes are assembled from the renderer's own atlas via the shared
+        // ReferenceText builders so the goldens are byte-identical to what
+        // TextSnapshotTests renders from an atlas built the same deterministic way.
+        let textGoldens: [(name: String, scene: [Instance])] = [
+            (ReferenceText.referenceStringGoldenName, ReferenceText.referenceStringScene(atlas: renderer.atlas)),
+            (ReferenceText.mixedFrameGoldenName, ReferenceText.mixedFrameScene(atlas: renderer.atlas)),
+            (ReferenceText.twoColorsGoldenName, ReferenceText.twoColorsScene(atlas: renderer.atlas)),
+        ]
+
+        for golden in goldens + textGoldens {
             let frame = renderer.captureSdfFrame(
                 golden.scene,
                 width: referenceWidth,
@@ -124,7 +133,10 @@ private final class BenchWindow: NSObject, NSWindowDelegate {
 
     init(metallibPath: String) {
         renderer = Renderer(metallibPath: metallibPath)
-        editor = SceneEditor(instances: Instance.referenceScene)
+        // The text overlay is built from the renderer's atlas so the operator can
+        // eye-check the production glyph branch live; the editor toggles it on/off.
+        let textOverlay = ReferenceText.referenceStringScene(atlas: renderer.atlas)
+        editor = SceneEditor(instances: Instance.referenceScene, textOverlay: textOverlay)
 
         metalLayer = CAMetalLayer()
         metalLayer.device = MTLCreateSystemDefaultDevice()
@@ -235,8 +247,16 @@ private final class BenchContentView: NSView {
 // selected instance by a fixed step so the operator can sweep sizes, colors, and
 // radii and watch the SDF respond. Pure model state — no Metal, no AppKit views.
 private final class SceneEditor {
-    private(set) var instances: [Instance]
+    private var baseInstances: [Instance]
+    private let textOverlay: [Instance]
+    private var textVisible = false
     private var selection: Int = 0
+
+    // The scene handed to the renderer: the editable SDF instances, plus the fixed
+    // text overlay when toggled on, so SDF and glyph instances draw in one pass.
+    var instances: [Instance] {
+        textVisible ? baseInstances + textOverlay : baseInstances
+    }
 
     private static let sizeStep: Float = 10
     private static let radiusStep: Float = 4
@@ -245,9 +265,10 @@ private final class SceneEditor {
     private static let blurStep: Float = 4
     private static let borderStep: Float = 2
 
-    init(instances: [Instance]) {
+    init(instances: [Instance], textOverlay: [Instance]) {
         precondition(!instances.isEmpty, "The bench scene must start with at least one instance")
-        self.instances = instances
+        self.baseInstances = instances
+        self.textOverlay = textOverlay
     }
 
     // Returns true if the key was a recognized control, false to let AppKit
@@ -279,9 +300,15 @@ private final class SceneEditor {
         case "T": adjust(\.borderThickness, by: -Self.borderStep); return true
         case "n": adjust(\.borderColorA, by: Self.colorStep, clampUnit: true); return true
         case "N": adjust(\.borderColorA, by: -Self.colorStep, clampUnit: true); return true
+        case "x": toggleText(); return true
         case "0": resetSelected(); return true
         default: return false
         }
+    }
+
+    private func toggleText() {
+        textVisible.toggle()
+        print(textVisible ? "text overlay ON" : "text overlay OFF")
     }
 
     func printControls() {
@@ -298,19 +325,20 @@ private final class SceneEditor {
               o / O     raise / lower shadow alpha
               t / T     grow / shrink border thickness
               n / N     raise / lower border alpha
+              x         toggle the glyph text overlay
               0         reset the selected instance to its reference value
-            \(instances.count) instances loaded; editing #\(selection).
+            \(baseInstances.count) instances loaded; editing #\(selection).
             """
         )
     }
 
     private func cycleSelection() {
-        selection = (selection + 1) % instances.count
+        selection = (selection + 1) % baseInstances.count
         print("editing instance #\(selection)")
     }
 
     private func resetSelected() {
-        instances[selection] = Instance.referenceScene[selection % Instance.referenceScene.count]
+        baseInstances[selection] = Instance.referenceScene[selection % Instance.referenceScene.count]
         print("reset instance #\(selection)")
     }
 
@@ -319,12 +347,12 @@ private final class SceneEditor {
         by delta: Float,
         clampUnit: Bool = false
     ) {
-        var next = instances[selection][keyPath: field] + delta
+        var next = baseInstances[selection][keyPath: field] + delta
         if clampUnit {
             next = min(1, max(0, next))
         } else {
             next = max(0, next)
         }
-        instances[selection][keyPath: field] = next
+        baseInstances[selection][keyPath: field] = next
     }
 }

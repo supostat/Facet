@@ -1,35 +1,43 @@
 import Foundation
 
 // The kind of primitive an Instance describes. The raw value is the contract
-// shared verbatim with the MSL `enum`/switch in sdf.metal; Phase 2 ships a
-// single case. Stored as UInt32 to match the MSL `uint` field with no padding.
+// shared verbatim with the MSL `enum`/switch in sdf.metal. Stored as UInt32 to
+// match the MSL `uint` field with no padding. `glyph` selects the atlas-sampling
+// branch in sdf_vertex/sdf_fragment; the SDF and glyph kinds draw together in one
+// instanced pass, distinguished only by this discriminant.
 enum InstanceType: UInt32 {
     case sdfRoundedRect = 0
+    case glyph = 1
 }
 
 // One GPU instance: a flat, behavior-free value with a fixed C-compatible field
 // order. The field order IS the Р13 contract — the MSL `struct Instance` in
 // sdf.metal mirrors it field-for-field, and a future Zig `extern struct` will
-// mirror it again. The layout is 21 Float fields with one UInt32 (`type`) wedged
-// at field 10, giving an 88-byte stride with no trailing padding, so the array
+// mirror it again. The layout is 25 Float fields with one UInt32 (`type`) wedged
+// at field 10, giving a 104-byte stride with no trailing padding, so the array
 // uploads as a packed buffer.
 //
 // The first ten fields (offsets 0..36) are the Phase 2 body: positionX/Y,
 // width/height, colorR/G/B/A, cornerRadius, type. Those offsets are frozen —
-// shadow and border were APPENDED after `type` so Phase 2 goldens stay
-// byte-identical. The trailing twelve floats (offsets 40..84) are the Phase 3
-// shadow + border: shadowOffsetX/Y, shadowBlurRadius, shadowColorR/G/B/A,
-// borderThickness, borderColorR/G/B/A. Their defaults are inert — shadowColorA
-// 0, borderThickness 0, blur 0, offset 0 — so a Phase 2 instance composites
-// exactly as before (no shadow contribution, border band collapses to nothing,
-// quad is not inflated).
+// shadow, border, and the atlas rect were APPENDED after `type` so earlier
+// goldens stay byte-identical. Offsets 40..84 are the Phase 3 shadow + border:
+// shadowOffsetX/Y, shadowBlurRadius, shadowColorR/G/B/A, borderThickness,
+// borderColorR/G/B/A. The trailing four floats (offsets 88..100) are the Phase 5
+// glyph atlas sub-rectangle: atlasMinU/atlasMinV/atlasMaxU/atlasMaxV. All
+// appended defaults are inert — shadowColorA 0, borderThickness 0, blur 0,
+// offset 0, atlas rect (0,0,0,0) — so an SDF instance composites exactly as
+// before (no shadow contribution, border band collapses to nothing, quad is not
+// inflated, glyph branch never taken).
 //
 // Geometry is expressed in drawable pixels with a top-left origin: positionX/Y
 // is the rectangle center, width/height its full extent. Color is
 // straight-alpha RGBA in [0, 1]; the shader premultiplies. cornerRadius and
 // borderThickness are in pixels and are clamped to half the shorter side by the
 // shader. shadowOffset shifts the shadow silhouette in pixels; shadowBlurRadius
-// is the soft falloff half-width; shadowColor is straight-alpha RGBA.
+// is the soft falloff half-width; shadowColor is straight-alpha RGBA. For a
+// glyph instance (type == .glyph) the atlasMin/Max U/V name the glyph's
+// sub-rectangle in [0, 1] atlas texture coordinates and `color` tints the
+// sampled R8 coverage.
 struct Instance {
     var positionX: Float
     var positionY: Float
@@ -53,6 +61,10 @@ struct Instance {
     var borderColorG: Float
     var borderColorB: Float
     var borderColorA: Float
+    var atlasMinU: Float
+    var atlasMinV: Float
+    var atlasMaxU: Float
+    var atlasMaxV: Float
 
     init(
         center: (x: Float, y: Float),
@@ -64,7 +76,8 @@ struct Instance {
         shadowBlurRadius: Float = 0,
         shadowColor: (r: Float, g: Float, b: Float, a: Float) = (0, 0, 0, 0),
         borderThickness: Float = 0,
-        borderColor: (r: Float, g: Float, b: Float, a: Float) = (0, 0, 0, 0)
+        borderColor: (r: Float, g: Float, b: Float, a: Float) = (0, 0, 0, 0),
+        atlasRect: (minU: Float, minV: Float, maxU: Float, maxV: Float) = (0, 0, 0, 0)
     ) {
         positionX = center.x
         positionY = center.y
@@ -88,6 +101,10 @@ struct Instance {
         borderColorG = borderColor.g
         borderColorB = borderColor.b
         borderColorA = borderColor.a
+        atlasMinU = atlasRect.minU
+        atlasMinV = atlasRect.minV
+        atlasMaxU = atlasRect.maxU
+        atlasMaxV = atlasRect.maxV
     }
 
     // Hardcoded scene for the windowed app and the snapshot golden (§0a:
