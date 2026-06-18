@@ -20,6 +20,10 @@ const metal_min = "-mmacosx-version-min=26.0";
 const app_sources = [_][]const u8{
     "src/platform/Instance.swift",
     "src/platform/MetallibLocator.swift",
+    "src/platform/ShelfPacker.swift",
+    "src/platform/GlyphRasterizer.swift",
+    "src/platform/Atlas.swift",
+    "src/platform/AtlasInspector.swift",
     "src/platform/Renderer.swift",
     "src/platform/FrameLoop.swift",
     "src/platform/Window.swift",
@@ -31,6 +35,10 @@ const app_sources = [_][]const u8{
 const clear_test_sources = [_][]const u8{
     "src/platform/Instance.swift",
     "src/platform/MetallibLocator.swift",
+    "src/platform/ShelfPacker.swift",
+    "src/platform/GlyphRasterizer.swift",
+    "src/platform/Atlas.swift",
+    "src/platform/AtlasInspector.swift",
     "src/platform/Renderer.swift",
     "tests/snapshots/clear_frame_test.swift",
 };
@@ -39,8 +47,13 @@ const clear_test_sources = [_][]const u8{
 const sdf_test_sources = [_][]const u8{
     "src/platform/Instance.swift",
     "src/platform/MetallibLocator.swift",
+    "src/platform/ShelfPacker.swift",
+    "src/platform/GlyphRasterizer.swift",
+    "src/platform/Atlas.swift",
+    "src/platform/AtlasInspector.swift",
     "src/platform/Renderer.swift",
     "tests/snapshots/PngImage.swift",
+    "tests/snapshots/SnapshotComparator.swift",
     "tests/snapshots/RendererSnapshotTests.swift",
 };
 
@@ -48,8 +61,13 @@ const sdf_test_sources = [_][]const u8{
 const phase3_test_sources = [_][]const u8{
     "src/platform/Instance.swift",
     "src/platform/MetallibLocator.swift",
+    "src/platform/ShelfPacker.swift",
+    "src/platform/GlyphRasterizer.swift",
+    "src/platform/Atlas.swift",
+    "src/platform/AtlasInspector.swift",
     "src/platform/Renderer.swift",
     "tests/snapshots/PngImage.swift",
+    "tests/snapshots/SnapshotComparator.swift",
     "tests/snapshots/Phase3ShadowBorderTests.swift",
 };
 
@@ -58,16 +76,56 @@ const phase3_test_sources = [_][]const u8{
 const bench_sources = [_][]const u8{
     "src/platform/Instance.swift",
     "src/platform/MetallibLocator.swift",
+    "src/platform/ShelfPacker.swift",
+    "src/platform/GlyphRasterizer.swift",
+    "src/platform/Atlas.swift",
+    "src/platform/AtlasInspector.swift",
     "src/platform/Renderer.swift",
     "src/platform/FrameLoop.swift",
     "src/platform/Window.swift",
     "tests/snapshots/PngImage.swift",
+    "tests/snapshots/ReferenceAtlas.swift",
+    "harness/renderer-bench/AtlasViewer.swift",
     // Not named main.swift: swiftc treats a literal main.swift as top-level
     // code, which conflicts with the @main attribute on RendererBench.
     "harness/renderer-bench/RendererBench.swift",
 };
 
-const linked_frameworks = [_][]const u8{ "Metal", "QuartzCore", "AppKit", "ImageIO", "CoreGraphics" };
+// CoreText is required by GlyphRasterizer (the only Core Text imaging site);
+// every Swift binary now links it because Renderer owns the Atlas, which pulls
+// in GlyphRasterizer.
+const linked_frameworks = [_][]const u8{ "Metal", "QuartzCore", "AppKit", "ImageIO", "CoreGraphics", "CoreText" };
+
+// The glyph-atlas logic test: the four atlas files plus AtlasTests. It uses the
+// test-only Atlas(device:initialSize:) and constructs no Renderer, so it links
+// neither Renderer.swift nor MetallibLocator and does not need glyph.metal in
+// the metallib.
+const atlas_test_sources = [_][]const u8{
+    "src/platform/ShelfPacker.swift",
+    "src/platform/GlyphRasterizer.swift",
+    "src/platform/Atlas.swift",
+    "src/platform/AtlasInspector.swift",
+    "tests/atlas/AtlasTests.swift",
+};
+
+// The atlas golden + metric snapshot test: the four atlas files plus Instance +
+// Renderer (the shared SnapshotComparator references CapturedFrame, defined on
+// Renderer), the gray PNG reader (PngImage), the shared comparator, the shared
+// reference-atlas definition, and AtlasSnapshotTests. It constructs no Renderer
+// and loads no metallib — Renderer is compiled only so CapturedFrame resolves;
+// the golden is the R8 dump, sampled by nothing here.
+const atlas_snapshot_test_sources = [_][]const u8{
+    "src/platform/Instance.swift",
+    "src/platform/ShelfPacker.swift",
+    "src/platform/GlyphRasterizer.swift",
+    "src/platform/Atlas.swift",
+    "src/platform/AtlasInspector.swift",
+    "src/platform/Renderer.swift",
+    "tests/snapshots/PngImage.swift",
+    "tests/snapshots/SnapshotComparator.swift",
+    "tests/snapshots/ReferenceAtlas.swift",
+    "tests/snapshots/AtlasSnapshotTests.swift",
+};
 
 pub fn build(b: *std.Build) void {
     const metallib = compileMetallib(b);
@@ -82,7 +140,7 @@ pub fn build(b: *std.Build) void {
     addRunStep(b, "run-debug", "Build and run the app with Metal API Validation ON", debug_app_binary, metallib, true);
 
     const bench_binary = compileSwift(b, "facet-bench", &bench_sources, .release);
-    addRunStep(b, "bench", "Live eye-check window, or --write-reference to regenerate goldens", bench_binary, metallib, false);
+    addRunStep(b, "bench", "Live eye-check window, --atlas for the live glyph atlas viewer, or --write-reference to regenerate goldens", bench_binary, metallib, false);
 
     const clear_test_binary = compileSwift(b, "clear-frame-test", &clear_test_sources, .debug);
     const clear_test_run = runBinary(b, clear_test_binary, metallib, true);
@@ -96,10 +154,24 @@ pub fn build(b: *std.Build) void {
     const phase3_test_run = runBinary(b, phase3_test_binary, metallib, true);
     phase3_test_run.expectExitCode(0);
 
+    // The atlas logic test takes no metallib: it constructs no Renderer and does
+    // not sample a glyph shader, only the atlas texture upload/readback path.
+    const atlas_test_binary = compileSwift(b, "atlas-test", &atlas_test_sources, .debug);
+    const atlas_test_run = runBinaryWithoutMetallib(b, atlas_test_binary, true);
+    atlas_test_run.expectExitCode(0);
+
+    // The atlas golden + metric test also constructs no Renderer (Renderer is
+    // compiled only for the CapturedFrame type), so it loads no metallib.
+    const atlas_snapshot_test_binary = compileSwift(b, "atlas-snapshot-test", &atlas_snapshot_test_sources, .debug);
+    const atlas_snapshot_test_run = runBinaryWithoutMetallib(b, atlas_snapshot_test_binary, true);
+    atlas_snapshot_test_run.expectExitCode(0);
+
     const test_step = b.step("test", "Run the headless clear-frame and SDF snapshot tests (Metal validation ON)");
     test_step.dependOn(&clear_test_run.step);
     test_step.dependOn(&sdf_test_run.step);
     test_step.dependOn(&phase3_test_run.step);
+    test_step.dependOn(&atlas_test_run.step);
+    test_step.dependOn(&atlas_snapshot_test_run.step);
 }
 
 const Optimization = enum { debug, release };
@@ -121,19 +193,27 @@ fn compileSwift(
     return compile.addOutputFileArg(binary_basename);
 }
 
-// Compiles src/shaders/sdf.metal to a .metallib in two stages, mirroring
-// compileSwift: `xcrun metal -c` produces an .air, `xcrun metallib` links it.
-// Both stages use addOutputFileArg so an edit to the shader rebuilds the lib.
+// Compiles the Metal shaders to a single .metallib in two stages, mirroring
+// compileSwift: `xcrun metal -c` produces one .air per source, `xcrun metallib`
+// links them all into one library. Both stages use addOutputFileArg so an edit
+// to any shader rebuilds the lib. sdf.metal and glyph.metal fold into the same
+// sdf.metallib; the name is unchanged so MetallibLocator/Renderer are untouched.
 fn compileMetallib(b: *std.Build) std.Build.LazyPath {
-    const air = b.addSystemCommand(&.{ "xcrun", "metal", "-c", metal_std, metal_min });
-    air.addFileArg(b.path("src/shaders/sdf.metal"));
-    air.addArg("-o");
-    const air_path = air.addOutputFileArg("sdf.air");
+    const sdf_air = compileMetalAir(b, "src/shaders/sdf.metal", "sdf.air");
+    const glyph_air = compileMetalAir(b, "src/shaders/glyph.metal", "glyph.air");
 
     const link = b.addSystemCommand(&.{ "xcrun", "metallib" });
-    link.addFileArg(air_path);
+    link.addFileArg(sdf_air);
+    link.addFileArg(glyph_air);
     link.addArg("-o");
     return link.addOutputFileArg("sdf.metallib");
+}
+
+fn compileMetalAir(b: *std.Build, source: []const u8, air_basename: []const u8) std.Build.LazyPath {
+    const air = b.addSystemCommand(&.{ "xcrun", "metal", "-c", metal_std, metal_min });
+    air.addFileArg(b.path(source));
+    air.addArg("-o");
+    return air.addOutputFileArg(air_basename);
 }
 
 fn runBinary(
@@ -145,6 +225,23 @@ fn runBinary(
     const run = std.Build.Step.Run.create(b, "run swift binary");
     run.addFileArg(binary);
     run.addPrefixedFileArg("--metallib=", metallib);
+    if (metal_validation) {
+        run.setEnvironmentVariable("METAL_DEVICE_WRAPPER_TYPE", "1");
+        run.setEnvironmentVariable("MTL_DEBUG_LAYER", "1");
+    }
+    return run;
+}
+
+// For binaries that load no Metal library (the atlas logic test constructs no
+// Renderer): same Metal-validation env, no injected --metallib= and so no
+// metallib build dependency.
+fn runBinaryWithoutMetallib(
+    b: *std.Build,
+    binary: std.Build.LazyPath,
+    metal_validation: bool,
+) *std.Build.Step.Run {
+    const run = std.Build.Step.Run.create(b, "run swift binary");
+    run.addFileArg(binary);
     if (metal_validation) {
         run.setEnvironmentVariable("METAL_DEVICE_WRAPPER_TYPE", "1");
         run.setEnvironmentVariable("MTL_DEBUG_LAYER", "1");

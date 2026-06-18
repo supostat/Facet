@@ -3,10 +3,15 @@ import Foundation
 import Metal
 import QuartzCore
 
-// Bench harness for the SDF renderer. Two modes:
-//   --write-reference  headless: render the three canonical scenes and write
-//                      their golden PNGs next to the snapshot tests, then exit.
-//   (default)          open the live editable window so a human can tweak the
+// Bench harness for the SDF renderer. Modes:
+//   --write-reference  headless: render the canonical SDF scenes and the glyph
+//                      atlas dump, write their golden PNGs next to the snapshot
+//                      tests, then exit.
+//   --atlas            open the live atlas viewer: the ReferenceAtlas glyphs are
+//                      laid out as a row of tinted quads sampled from the R8
+//                      atlas texture, so a human can eye-check the rasterizer +
+//                      packer + glyph shader end to end.
+//   (default)          open the live editable SDF window so a human can tweak the
 //                      selected instance's size/color/radius with the keyboard
 //                      and eye-check the renderer's output frame by frame.
 // The harness sits outside the production path and is the bench-side external
@@ -27,6 +32,11 @@ struct RendererBench {
 
         if CommandLine.arguments.contains("--write-reference") {
             writeReferenceGoldens(metallibPath: metallibPath)
+            return
+        }
+
+        if CommandLine.arguments.contains("--atlas") {
+            runLiveAtlasWindow(metallibPath: metallibPath)
             return
         }
 
@@ -59,6 +69,31 @@ struct RendererBench {
             )
             print("wrote \(golden.name)")
         }
+
+        writeAtlasGolden(device: renderer.atlas.texture.device)
+    }
+
+    // The glyph-atlas golden: the deviceGray R8 dump of the fixed ReferenceAtlas
+    // texture, in top-left atlas space (the orientation the rasterizer flips into
+    // and AtlasSnapshotTests reads back). compareGray validates the test render
+    // against this single-channel image.
+    private static func writeAtlasGolden(device: MTLDevice) {
+        let atlas = ReferenceAtlas.build(device: device)
+        let url = URL(fileURLWithPath: goldensDirectory).appendingPathComponent(ReferenceAtlas.goldenName)
+        AtlasInspector.writeTexturePng(atlas.texture, to: url)
+        print("wrote \(ReferenceAtlas.goldenName)")
+        print(AtlasInspector.machineDump(atlas.snapshot()))
+    }
+
+    private static func runLiveAtlasWindow(metallibPath: String) {
+        let application = NSApplication.shared
+        application.setActivationPolicy(.regular)
+        application.activate()
+
+        let window = AtlasViewerWindow(metallibPath: metallibPath)
+        window.show()
+
+        application.run()
     }
 
     private static func runLiveWindow(metallibPath: String) {

@@ -29,6 +29,12 @@ final class Renderer {
     private let commandQueue: MTLCommandQueue
     private let sdfPipelineState: MTLRenderPipelineState
 
+    // The lazy glyph atlas, created and owned with the renderer's device. This
+    // phase only stands the atlas up (the bench atlas viewer and the snapshot
+    // test exercise it); no glyph pipeline is built here — that lands when a real
+    // glyph draw is issued, to avoid a dead unused-pipeline stub in production.
+    let atlas: Atlas
+
     private var instanceBuffer: MTLBuffer
     private var instanceCapacity: Int
 
@@ -50,6 +56,7 @@ final class Renderer {
 
         let library = Self.loadLibrary(device: device, path: metallibPath)
         self.sdfPipelineState = Self.makeSdfPipelineState(device: device, library: library)
+        self.atlas = Atlas(device: device)
 
         self.instanceCapacity = Self.minimumInstanceCapacity
         guard let buffer = device.makeBuffer(

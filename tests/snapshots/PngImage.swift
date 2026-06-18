@@ -17,6 +17,13 @@ enum PngImage {
         rawValue: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
     )
 
+    // Single-channel R8 (deviceGray, alpha .none, no colormatch) — the grayscale
+    // analogue of the RGBA round-trip above for the atlas mask dump. The R8 atlas
+    // texture is one byte per pixel; an untagged deviceGray space with alpha
+    // .none performs no colormatch, so write(bytes) == read(file) byte-for-byte.
+    private static let grayBytesPerPixel = 1
+    private static let grayBitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue)
+
     static func write(bgraPixels: [UInt8], width: Int, height: Int, url: URL) {
         let expectedCount = width * height * bytesPerPixel
         precondition(
@@ -68,6 +75,37 @@ enum PngImage {
         }
 
         return (bgraPixels: pixels, width: width, height: height)
+    }
+
+    static func readGray(url: URL) -> (grayPixels: [UInt8], width: Int, height: Int) {
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            fatalError("PngImage.readGray: could not open a PNG source at \(url.path)")
+        }
+        guard let image = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            fatalError("PngImage.readGray: could not decode the PNG at \(url.path)")
+        }
+
+        let width = image.width
+        let height = image.height
+        let bytesPerRow = width * grayBytesPerPixel
+        var pixels = [UInt8](repeating: 0, count: bytesPerRow * height)
+
+        pixels.withUnsafeMutableBytes { buffer in
+            guard let context = CGContext(
+                data: buffer.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: bitsPerComponent,
+                bytesPerRow: bytesPerRow,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: grayBitmapInfo.rawValue
+            ) else {
+                fatalError("PngImage.readGray: could not create a decode context for \(url.path)")
+            }
+            context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        }
+
+        return (grayPixels: pixels, width: width, height: height)
     }
 
     private static func makeCGImage(bgraPixels: [UInt8], width: Int, height: Int) -> CGImage {
