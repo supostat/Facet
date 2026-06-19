@@ -227,6 +227,13 @@ pub fn build(b: *std.Build) void {
     const shaper_test_run = runBinary(b, shaper_test_binary, metallib, true);
     shaper_test_run.expectExitCode(0);
 
+    // The Block-II shadow-tree engine core: a NATIVE zig test artifact (no swiftc,
+    // no metallib). tree.zig pulls debug.zig's tests in via a co-located import,
+    // so this single addTest runs both modules' co-located test blocks.
+    const core_module = b.createModule(.{ .root_source_file = b.path("src/core/tree.zig"), .target = b.graph.host, .optimize = .Debug });
+    const core_test = b.addTest(.{ .name = "core-test", .root_module = core_module });
+    const core_test_run = b.addRunArtifact(core_test);
+
     const test_step = b.step("test", "Run the headless clear-frame and SDF snapshot tests (Metal validation ON)");
     test_step.dependOn(&clear_test_run.step);
     test_step.dependOn(&sdf_test_run.step);
@@ -235,6 +242,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&atlas_snapshot_test_run.step);
     test_step.dependOn(&text_test_run.step);
     test_step.dependOn(&shaper_test_run.step);
+    test_step.dependOn(&core_test_run.step);
 }
 
 const Optimization = enum { debug, release };
