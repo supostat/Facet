@@ -17,6 +17,14 @@ enum ReferenceText {
     static let mixedFrameGoldenName = "text_mixed_frame.png"
     static let twoColorsGoldenName = "text_two_colors_same_glyphs.png"
 
+    // Phase 6 goldens: a proportionally shaped line, a kerning-bearing pair, and a
+    // monospace font run THROUGH the Shaper (the fixed-advance regression — proving
+    // the shaper's natural advances reduce to a monospace cadence for a monospace
+    // face, with TextLayout kept as the explicit reference).
+    static let proportionalLineGoldenName = "phase6-proportional-line.png"
+    static let kerningPairGoldenName = "phase6-kerning-pair.png"
+    static let monospaceRegressionGoldenName = "phase6-monospace-regression.png"
+
     static let fontName = "Helvetica"
     static let pointSize: CGFloat = 32
     // Fixed monospace pen advance in pixels: wide enough that 32pt Helvetica
@@ -56,8 +64,29 @@ enum ReferenceText {
         start: (200, 420)
     )
 
+    // Phase 6 monospace face: every glyph shares one advance, so a run through the
+    // Shaper must reproduce a monospace cadence (the equal-advances unit) while the
+    // golden eye-checks the same proportional path.
+    static let monospaceFontName = "Menlo"
+
+    // Ligature-free strings: Core Text forms ligatures by default (fi -> one
+    // glyph), which would break the count==scalar-count edge assert and the
+    // shaped-order position asserts. iWmil/AV/To carry no default ligatures.
+    static let proportionalString = "iWmil"
+    static let proportionalStartPosition: (x: Float, y: Float) = (80, 320)
+
+    static let kerningString = "AV"
+    static let kerningStartPosition: (x: Float, y: Float) = (200, 320)
+
+    static let monospaceString = "iWmil"
+    static let monospaceStartPosition: (x: Float, y: Float) = (80, 320)
+
     static func font() -> CTFont {
         CTFontCreateWithName(fontName as CFString, pointSize, nil)
+    }
+
+    static func monospaceFont() -> CTFont {
+        CTFontCreateWithName(monospaceFontName as CFString, pointSize, nil)
     }
 
     static func referenceStringScene(atlas: Atlas) -> [Instance] {
@@ -106,5 +135,32 @@ enum ReferenceText {
             )
         )
         return scene
+    }
+
+    static func proportionalLineScene(atlas: Atlas) -> [Instance] {
+        let shaped = Shaper.shape(
+            string: proportionalString,
+            font: font(),
+            origin: proportionalStartPosition
+        )
+        return Shaper.instances(for: shaped, color: textColor, atlas: atlas)
+    }
+
+    static func kerningPairScene(atlas: Atlas) -> [Instance] {
+        let shaped = Shaper.shape(
+            string: kerningString,
+            font: font(),
+            origin: kerningStartPosition
+        )
+        return Shaper.instances(for: shaped, color: textColor, atlas: atlas)
+    }
+
+    static func monospaceRegressionScene(atlas: Atlas) -> [Instance] {
+        let shaped = Shaper.shape(
+            string: monospaceString,
+            font: monospaceFont(),
+            origin: monospaceStartPosition
+        )
+        return Shaper.instances(for: shaped, color: textColor, atlas: atlas)
     }
 }

@@ -61,6 +61,9 @@ struct RendererBench {
             (ReferenceText.referenceStringGoldenName, ReferenceText.referenceStringScene(atlas: renderer.atlas)),
             (ReferenceText.mixedFrameGoldenName, ReferenceText.mixedFrameScene(atlas: renderer.atlas)),
             (ReferenceText.twoColorsGoldenName, ReferenceText.twoColorsScene(atlas: renderer.atlas)),
+            (ReferenceText.proportionalLineGoldenName, ReferenceText.proportionalLineScene(atlas: renderer.atlas)),
+            (ReferenceText.kerningPairGoldenName, ReferenceText.kerningPairScene(atlas: renderer.atlas)),
+            (ReferenceText.monospaceRegressionGoldenName, ReferenceText.monospaceRegressionScene(atlas: renderer.atlas)),
         ]
 
         for golden in goldens + textGoldens {
@@ -131,12 +134,32 @@ private final class BenchWindow: NSObject, NSWindowDelegate {
     private let frameLoop: FrameLoop
     private let editor: SceneEditor
 
+    // The proportional Shaper overlay sits one baseline below the monospace row so
+    // the operator can eye-check both paths drawing through the same glyph branch:
+    // the fixed-advance TextLayout row above and the Core-Text-shaped row below.
+    private static let proportionalOverlayBaseline: (x: Float, y: Float) = (60, 460)
+
     init(metallibPath: String) {
         renderer = Renderer(metallibPath: metallibPath)
-        // The text overlay is built from the renderer's atlas so the operator can
-        // eye-check the production glyph branch live; the editor toggles it on/off.
-        let textOverlay = ReferenceText.referenceStringScene(atlas: renderer.atlas)
-        editor = SceneEditor(instances: Instance.referenceScene, textOverlay: textOverlay)
+        // Both overlays are built from the renderer's atlas so the operator can
+        // eye-check the production glyph branch live; the editor toggles them on/off
+        // together. The monospace row comes through the fixed-advance TextLayout
+        // reference; the proportional row comes through the production Shaper.
+        let monospaceOverlay = ReferenceText.referenceStringScene(atlas: renderer.atlas)
+        let proportionalShaped = Shaper.shape(
+            string: ReferenceText.referenceString,
+            font: ReferenceText.font(),
+            origin: Self.proportionalOverlayBaseline
+        )
+        let proportionalOverlay = Shaper.instances(
+            for: proportionalShaped,
+            color: ReferenceText.textColor,
+            atlas: renderer.atlas
+        )
+        editor = SceneEditor(
+            instances: Instance.referenceScene,
+            textOverlay: monospaceOverlay + proportionalOverlay
+        )
 
         metalLayer = CAMetalLayer()
         metalLayer.device = MTLCreateSystemDefaultDevice()
@@ -325,7 +348,7 @@ private final class SceneEditor {
               o / O     raise / lower shadow alpha
               t / T     grow / shrink border thickness
               n / N     raise / lower border alpha
-              x         toggle the glyph text overlay
+              x         toggle the text overlays (monospace row + shaped row)
               0         reset the selected instance to its reference value
             \(baseInstances.count) instances loaded; editing #\(selection).
             """

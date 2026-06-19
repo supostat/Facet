@@ -25,6 +25,7 @@ const app_sources = [_][]const u8{
     "src/platform/Atlas.swift",
     "src/platform/AtlasInspector.swift",
     "src/platform/TextLayout.swift",
+    "src/platform/Shaper.swift",
     "src/platform/Renderer.swift",
     "src/platform/FrameLoop.swift",
     "src/platform/Window.swift",
@@ -85,6 +86,7 @@ const bench_sources = [_][]const u8{
     "src/platform/Atlas.swift",
     "src/platform/AtlasInspector.swift",
     "src/platform/TextLayout.swift",
+    "src/platform/Shaper.swift",
     "src/platform/Renderer.swift",
     "src/platform/FrameLoop.swift",
     "src/platform/Window.swift",
@@ -146,11 +148,32 @@ const text_test_sources = [_][]const u8{
     "src/platform/Atlas.swift",
     "src/platform/AtlasInspector.swift",
     "src/platform/TextLayout.swift",
+    "src/platform/Shaper.swift",
     "src/platform/Renderer.swift",
     "tests/snapshots/PngImage.swift",
     "tests/snapshots/SnapshotComparator.swift",
     "tests/snapshots/ReferenceText.swift",
     "tests/snapshots/TextSnapshotTests.swift",
+};
+
+// The Phase 6 shaper golden + deterministic-position test: same atlas + Renderer
+// stack as the text test, plus Shaper (the line shaper under test) and the shared
+// ReferenceText scenes. Like the text test it constructs a Renderer whose glyph
+// fragment branch samples the atlas, so it loads the metallib.
+const shaper_test_sources = [_][]const u8{
+    "src/platform/Instance.swift",
+    "src/platform/MetallibLocator.swift",
+    "src/platform/ShelfPacker.swift",
+    "src/platform/GlyphRasterizer.swift",
+    "src/platform/Atlas.swift",
+    "src/platform/AtlasInspector.swift",
+    "src/platform/TextLayout.swift",
+    "src/platform/Shaper.swift",
+    "src/platform/Renderer.swift",
+    "tests/snapshots/PngImage.swift",
+    "tests/snapshots/SnapshotComparator.swift",
+    "tests/snapshots/ReferenceText.swift",
+    "tests/snapshots/ShaperSnapshotTests.swift",
 };
 
 pub fn build(b: *std.Build) void {
@@ -198,6 +221,12 @@ pub fn build(b: *std.Build) void {
     const text_test_run = runBinary(b, text_test_binary, metallib, true);
     text_test_run.expectExitCode(0);
 
+    // The shaper test constructs a Renderer and the glyph fragment branch samples
+    // the atlas texture, so it loads the metallib (like the text test).
+    const shaper_test_binary = compileSwift(b, "shaper-snapshot-test", &shaper_test_sources, .debug);
+    const shaper_test_run = runBinary(b, shaper_test_binary, metallib, true);
+    shaper_test_run.expectExitCode(0);
+
     const test_step = b.step("test", "Run the headless clear-frame and SDF snapshot tests (Metal validation ON)");
     test_step.dependOn(&clear_test_run.step);
     test_step.dependOn(&sdf_test_run.step);
@@ -205,6 +234,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&atlas_test_run.step);
     test_step.dependOn(&atlas_snapshot_test_run.step);
     test_step.dependOn(&text_test_run.step);
+    test_step.dependOn(&shaper_test_run.step);
 }
 
 const Optimization = enum { debug, release };
