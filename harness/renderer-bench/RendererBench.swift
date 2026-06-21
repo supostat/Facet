@@ -86,7 +86,7 @@ struct RendererBench {
     }
 
     // The glyph-atlas golden: the deviceGray R8 dump of the fixed ReferenceAtlas
-    // texture, in top-left atlas space (the orientation the rasterizer flips into
+    // texture, in top-left atlas space (the orientation the rasterizer produces
     // and AtlasSnapshotTests reads back). compareGray validates the test render
     // against this single-channel image.
     private static func writeAtlasGolden(device: MTLDevice) {

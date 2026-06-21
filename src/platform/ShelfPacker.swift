@@ -2,7 +2,7 @@ import Foundation
 
 // A placed rectangle in top-left atlas pixel space: (x, y) is the top-left
 // corner, (width, height) the extent. This is the SAME coordinate space the
-// rasterizer's mask is flipped into and that texture.replace uploads into, so a
+// rasterizer's mask is produced in and that texture.replace uploads into, so a
 // placement maps one-to-one to a texture region with no orientation conversion.
 struct PackedRectangle: Equatable {
     let x: Int

@@ -18,9 +18,10 @@ struct RasterizedGlyph {
 }
 
 // The ONLY Core Text imaging site. Turns a (CTFont, CGGlyph) into an R8 alpha
-// mask via a deviceGray CGContext, then flips the bottom-left CGContext output
-// to top-left atlas space before returning, so the mask matches the packer and
-// the texture upload with no further orientation handling. `rasterizationCount`
+// mask via a deviceGray CGContext. The context's DRAWING origin is bottom-left,
+// but its BACKING MEMORY is already top-row-first (row 0 is the top of the
+// image) — exactly the top-left order the packer places into and texture.replace
+// uploads — so the mask is returned with no row reordering. `rasterizationCount`
 // is a machine-observable metric: it advances once per rasterize() call, so the
 // atlas cache test can assert a repeated lookup does NOT re-rasterize.
 final class GlyphRasterizer {
@@ -68,17 +69,12 @@ final class GlyphRasterizer {
             )
         }
 
-        let bottomLeftMask = drawGlyphMask(
+        let mask = drawGlyphMask(
             glyph: glyph,
             in: font,
             boundingRect: boundingRect,
             pixelWidth: pixelWidth,
             pixelHeight: pixelHeight
-        )
-        let topLeftMask = flipRowsToTopLeft(
-            bottomLeftMask,
-            width: pixelWidth,
-            height: pixelHeight
         )
 
         // Bearing in top-left space: X is the left side bearing; Y is the
@@ -88,7 +84,7 @@ final class GlyphRasterizer {
         return RasterizedGlyph(
             width: pixelWidth,
             height: pixelHeight,
-            alphaMask: topLeftMask,
+            alphaMask: mask,
             bearing: bearing,
             advance: advance
         )
@@ -118,27 +114,14 @@ final class GlyphRasterizer {
                 fatalError("GlyphRasterizer: could not create a deviceGray context (\(pixelWidth)x\(pixelHeight))")
             }
             context.setFillColor(CGColor(gray: 1, alpha: 1))
-            // CGContext is bottom-left; shift the glyph so its bounding box sits
-            // at the context origin. The negative origin pulls the glyph's
-            // bottom-left corner to (0, 0).
+            // The DRAWING coordinate system is bottom-left, so shift the glyph by
+            // its negative bounding-box origin to seat its corner at (0, 0) and
+            // fill the context. The backing memory stays top-row-first, so the
+            // returned buffer is already in top-left atlas order — no flip.
             var glyphToDraw = glyph
             var position = CGPoint(x: -boundingRect.minX, y: -boundingRect.minY)
             CTFontDrawGlyphs(font, &glyphToDraw, &position, 1, context)
         }
         return mask
-    }
-
-    // CGContext writes rows bottom-up; the atlas wants top-down. Reversing the
-    // row order converts the bottom-left mask to top-left atlas space.
-    private func flipRowsToTopLeft(_ bottomLeft: [UInt8], width: Int, height: Int) -> [UInt8] {
-        var topLeft = [UInt8](repeating: 0, count: bottomLeft.count)
-        for row in 0..<height {
-            let sourceStart = (height - 1 - row) * width
-            let destinationStart = row * width
-            for column in 0..<width {
-                topLeft[destinationStart + column] = bottomLeft[sourceStart + column]
-            }
-        }
-        return topLeft
     }
 }
