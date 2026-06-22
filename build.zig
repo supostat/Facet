@@ -234,7 +234,7 @@ pub fn build(b: *std.Build) void {
     const core_test = b.addTest(.{ .name = "core-test", .root_module = core_module });
     const core_test_run = b.addRunArtifact(core_test);
 
-    const test_step = b.step("test", "Run the headless clear-frame and SDF snapshot tests (Metal validation ON)");
+    const test_step = b.step("test", "Run the Swift snapshot tests and the native Zig engine-core tests (tree, layout, debug; Metal validation ON)");
     test_step.dependOn(&clear_test_run.step);
     test_step.dependOn(&sdf_test_run.step);
     test_step.dependOn(&phase3_test_run.step);

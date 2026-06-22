@@ -5,6 +5,16 @@ const std = @import("std");
 /// Phase 13, not here.
 pub const Kind = enum { view, text };
 
+/// The main-axis orientation of a container's children. row lays children along
+/// x (main == horizontal); column lays them along y (main == vertical). The
+/// layout engine reads this and never branches on width/height directly.
+pub const Direction = enum { row, column };
+
+/// Cross-axis alignment of a child within its container's content cross extent.
+/// start/center/end position a fixed cross size; stretch overrides the child's
+/// cross size to the full content cross extent.
+pub const Align = enum { start, center, end, stretch };
+
 /// The layout slot reserved for Phase 8 (the layout engine fills x,y,w,h). Left
 /// default-zero here; Phase 7 writes no coordinate logic.
 pub const LayoutResult = struct {
@@ -32,6 +42,20 @@ pub const Node = struct {
     color_b: f32 = 0,
     color_a: f32 = 0,
     corner_radius: f32 = 0,
+
+    // Layout-input fields (Phase 8). The layout engine reads these and writes the
+    // computed rect into `layout`. width/height above stay render-only props; the
+    // LAYOUT source of truth is main_size/cross_size, where null means flexible.
+    direction: Direction = .row,
+    gap: f32 = 0,
+    padding_top: f32 = 0,
+    padding_right: f32 = 0,
+    padding_bottom: f32 = 0,
+    padding_left: f32 = 0,
+    flex_grow: f32 = 0,
+    main_size: ?f32 = null,
+    cross_size: ?f32 = null,
+    cross_align: Align = .start,
 
     layout: LayoutResult = .{},
 };
@@ -149,6 +173,7 @@ fn childIndex(parent: *Node, child: *Node) usize {
 
 test {
     _ = @import("debug.zig");
+    _ = @import("layout.zig");
 }
 
 test "createNode assigns sequential ids resolvable via lookup" {
