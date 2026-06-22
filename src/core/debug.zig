@@ -63,7 +63,8 @@ fn writeMachine(node: *Node, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     try writer.print(" size=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT, .{ node.width, node.height });
     try writer.print(" color=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT, .{ node.color_r, node.color_g, node.color_b, node.color_a });
     try writer.print(" radius=" ++ FLOAT_FORMAT, .{node.corner_radius});
-    try writer.print(" layout=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "\n", .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
+    try writer.print(" layout=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT, .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
+    try writer.print(" layout_dirty={} paint_dirty={}\n", .{ node.layout_dirty, node.paint_dirty });
 }
 
 fn writePretty(node: *Node, writer: *std.Io.Writer, depth: usize) std.Io.Writer.Error!void {
@@ -72,7 +73,8 @@ fn writePretty(node: *Node, writer: *std.Io.Writer, depth: usize) std.Io.Writer.
     try writer.print("{s}#{d}", .{ @tagName(node.kind), node.id });
     try writer.print(" pos=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")", .{ node.position_x, node.position_y });
     try writer.print(" size=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")", .{ node.width, node.height });
-    try writer.print(" layout=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")\n", .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
+    try writer.print(" layout=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")", .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
+    try writer.print(" dirty=(layout={}, paint={})\n", .{ node.layout_dirty, node.paint_dirty });
 }
 
 /// The available main/cross space a node was laid into, recomputed from Node
@@ -165,9 +167,9 @@ test "machine dump renders children in array order, not ascending id" {
     defer std.testing.allocator.free(dumped);
 
     const expected =
-        "node id=0 kind=view parent=none children=[2,1] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000\n" ++
-        "node id=2 kind=view parent=0 children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000\n" ++
-        "node id=1 kind=view parent=0 children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000\n";
+        "node id=0 kind=view parent=none children=[2,1] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000 layout_dirty=false paint_dirty=false\n" ++
+        "node id=2 kind=view parent=0 children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000 layout_dirty=false paint_dirty=false\n" ++
+        "node id=1 kind=view parent=0 children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000 layout_dirty=false paint_dirty=false\n";
     try std.testing.expectEqualStrings(expected, dumped);
 }
 
@@ -189,11 +191,11 @@ test "machine dump walks a three-level tree in pre-order DFS, not breadth-first 
     defer std.testing.allocator.free(dumped);
 
     const expected =
-        "node id=0 kind=view parent=none children=[1,2] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000\n" ++
-        "node id=1 kind=view parent=0 children=[3,4] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000\n" ++
-        "node id=3 kind=view parent=1 children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000\n" ++
-        "node id=4 kind=view parent=1 children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000\n" ++
-        "node id=2 kind=view parent=0 children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000\n";
+        "node id=0 kind=view parent=none children=[1,2] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000 layout_dirty=false paint_dirty=false\n" ++
+        "node id=1 kind=view parent=0 children=[3,4] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000 layout_dirty=false paint_dirty=false\n" ++
+        "node id=3 kind=view parent=1 children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000 layout_dirty=false paint_dirty=false\n" ++
+        "node id=4 kind=view parent=1 children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000 layout_dirty=false paint_dirty=false\n" ++
+        "node id=2 kind=view parent=0 children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000 layout_dirty=false paint_dirty=false\n";
     try std.testing.expectEqualStrings(expected, dumped);
 }
 
@@ -209,8 +211,8 @@ test "machine dump renders refs by id and none for a root" {
     defer std.testing.allocator.free(dumped);
 
     const expected =
-        "node id=0 kind=view parent=none children=[1] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000\n" ++
-        "node id=1 kind=text parent=0 children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000\n";
+        "node id=0 kind=view parent=none children=[1] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000 layout_dirty=false paint_dirty=false\n" ++
+        "node id=1 kind=text parent=0 children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000 layout_dirty=false paint_dirty=false\n";
     try std.testing.expectEqualStrings(expected, dumped);
 }
 
@@ -234,7 +236,7 @@ test "machine dump reflects every prop field in the fixed line format" {
     const dumped = try dumpToString(&tree, false);
     defer std.testing.allocator.free(dumped);
 
-    const expected = "node id=0 kind=text parent=none children=[] pos=12.5000,-3.0000 size=360.0000,48.0000 color=0.9200,0.1000,0.2500,1.0000 radius=8.0000 layout=0.0000,0.0000,0.0000,0.0000\n";
+    const expected = "node id=0 kind=text parent=none children=[] pos=12.5000,-3.0000 size=360.0000,48.0000 color=0.9200,0.1000,0.2500,1.0000 radius=8.0000 layout=0.0000,0.0000,0.0000,0.0000 layout_dirty=false paint_dirty=true\n";
     try std.testing.expectEqualStrings(expected, dumped);
 }
 
@@ -303,9 +305,32 @@ test "machine dump enumerates two roots by ascending id" {
     defer std.testing.allocator.free(dumped);
 
     const expected =
-        "node id=0 kind=view parent=none children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000\n" ++
-        "node id=1 kind=text parent=none children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000\n";
+        "node id=0 kind=view parent=none children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000 layout_dirty=false paint_dirty=false\n" ++
+        "node id=1 kind=text parent=none children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000 layout_dirty=false paint_dirty=false\n";
     try std.testing.expectEqualStrings(expected, dumped);
+}
+
+test "machine dump appends the dirty flags and pretty surfaces them" {
+    var tree = Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const clean = try tree.createNode(.view);
+    const dirty = try tree.createNode(.view);
+    dirty.layout_dirty = true;
+    dirty.paint_dirty = true;
+    try tree.appendChild(clean, dirty);
+
+    const machine = try dumpToString(&tree, false);
+    defer std.testing.allocator.free(machine);
+    const pretty = try dumpToString(&tree, true);
+    defer std.testing.allocator.free(pretty);
+
+    const expected_machine =
+        "node id=0 kind=view parent=none children=[1] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000 layout_dirty=false paint_dirty=false\n" ++
+        "node id=1 kind=view parent=0 children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=0.0000,0.0000,0.0000,0.0000 layout_dirty=true paint_dirty=true\n";
+    try std.testing.expectEqualStrings(expected_machine, machine);
+    try std.testing.expect(std.mem.indexOf(u8, pretty, "dirty=(layout=false, paint=false)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pretty, "dirty=(layout=true, paint=true)") != null);
 }
 
 test "machine dump reflects computed layout coordinates" {
@@ -318,7 +343,7 @@ test "machine dump reflects computed layout coordinates" {
     const dumped = try dumpToString(&tree, false);
     defer std.testing.allocator.free(dumped);
 
-    const expected = "node id=0 kind=view parent=none children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=10.0000,5.0000,280.0000,90.0000\n";
+    const expected = "node id=0 kind=view parent=none children=[] pos=0.0000,0.0000 size=0.0000,0.0000 color=0.0000,0.0000,0.0000,0.0000 radius=0.0000 layout=10.0000,5.0000,280.0000,90.0000 layout_dirty=false paint_dirty=false\n";
     try std.testing.expectEqualStrings(expected, dumped);
 }
 

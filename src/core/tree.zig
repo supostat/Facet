@@ -99,6 +99,15 @@ pub const Node = struct {
     preferred: PreferredSize = .{},
 
     layout: LayoutResult = .{},
+
+    // Dirty-tracking fields (Phase 10). A prop mutation raises one of these per
+    // the dirty classification: paint_dirty for a render-only change repainted in
+    // place, layout_dirty for a geometry change re-measured/re-placed by the
+    // recompute pass. Both default false on a fresh node so the debug dump's
+    // per-node read is defined before any mutation; createNode applies the
+    // defaults via `node.* = .{ ... }`.
+    layout_dirty: bool = false,
+    paint_dirty: bool = false,
 };
 
 /// A partial prop update: every field is optional, and only the non-null fields
@@ -197,18 +206,27 @@ pub const Tree = struct {
         _ = self.nodes.remove(node.id);
     }
 
+    /// The render props updateNodeProps writes, each a paint-class prop
+    /// (dirty.classify), so writing any one raises paint_dirty. Named 1:1 in
+    /// PropsUpdate and Node; kind is excluded because it is structural and carries
+    /// no dirty flag. Every name here is asserted paint-class by the render_props
+    /// lock test in dirty.zig, pinning this inline raise to the classify authority
+    /// so the two paint-flag sources cannot drift.
+    pub const render_props = [_][]const u8{
+        "position_x", "position_y", "width",   "height",        "color_r",
+        "color_g",    "color_b",    "color_a", "corner_radius",
+    };
+
     /// Writes only the non-null fields of update; the others stay byte-untouched.
-    /// Never touches layout, id, parent, or children.
+    /// Never touches layout, id, parent, or children. Writing any render prop raises
+    /// paint_dirty once; kind is structural and carries no dirty flag.
     pub fn updateNodeProps(node: *Node, update: PropsUpdate) void {
-        if (update.position_x) |value| node.position_x = value;
-        if (update.position_y) |value| node.position_y = value;
-        if (update.width) |value| node.width = value;
-        if (update.height) |value| node.height = value;
-        if (update.color_r) |value| node.color_r = value;
-        if (update.color_g) |value| node.color_g = value;
-        if (update.color_b) |value| node.color_b = value;
-        if (update.color_a) |value| node.color_a = value;
-        if (update.corner_radius) |value| node.corner_radius = value;
+        inline for (render_props) |field| {
+            if (@field(update, field)) |value| {
+                @field(node, field) = value;
+                node.paint_dirty = true;
+            }
+        }
         if (update.kind) |value| node.kind = value;
     }
 };
@@ -223,10 +241,20 @@ fn childIndex(parent: *Node, child: *Node) usize {
     unreachable;
 }
 
+/// Whether a node's main-axis size is fixed and so independent of its content. The
+/// SINGLE authority for the dirty-bubble stop: a fixed-main container's preferred
+/// size never changes from a descendant's content, so a layout change need not
+/// bubble past it. Keyed off the explicit sizing_mode (a fit_content/flex node is
+/// content-dependent); the size-producing switches keep their own three-way arms.
+pub fn hasFixedMainSize(node: *const Node) bool {
+    return node.sizing_mode == .fixed;
+}
+
 test {
     _ = @import("debug.zig");
     _ = @import("layout.zig");
     _ = @import("measure.zig");
+    _ = @import("dirty.zig");
 }
 
 test "createNode assigns sequential ids resolvable via lookup" {
@@ -389,6 +417,7 @@ test "updateNodeProps writes only the named fields and leaves the rest" {
     try std.testing.expectEqual(@as(f32, 0.18), node.color_a);
     try std.testing.expectEqual(@as(f32, 19), node.corner_radius);
     try std.testing.expectEqual(@as(f32, 0), node.layout.x);
+    try std.testing.expect(node.paint_dirty);
 }
 
 test "updateNodeProps with an all-null update is a no-op" {
@@ -402,4 +431,5 @@ test "updateNodeProps with an all-null update is a no-op" {
 
     try std.testing.expectEqual(@as(f32, 42), node.position_x);
     try std.testing.expectEqual(Kind.view, node.kind);
+    try std.testing.expect(!node.paint_dirty);
 }

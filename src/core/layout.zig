@@ -51,6 +51,22 @@ pub fn layout(t: *Tree, container: *Node, box: ContainerBox) std.mem.Allocator.E
     place(container, box);
 }
 
+/// Re-runs the two-phase layout for a single subtree in place (Р12 dirty
+/// recompute), reusing the subtree's own prior laid-out box so the rest of the
+/// tree is untouched. Mirrors `layout`: re-measure the subtree at its current main
+/// extent (the measure cache shields unchanged text), then re-place into the same
+/// box. The recompute pass calls this on each maximal dirty-subtree root.
+pub fn recomputeSubtree(t: *Tree, subtree_root: *Node) std.mem.Allocator.Error!void {
+    const box = ContainerBox{
+        .x = subtree_root.layout.x,
+        .y = subtree_root.layout.y,
+        .width = subtree_root.layout.w,
+        .height = subtree_root.layout.h,
+    };
+    try measure.measure(t, subtree_root, AxisProjection.project(box, subtree_root.direction).main_extent);
+    place(subtree_root, box);
+}
+
 /// Places container's children along its main axis at the given absolute box,
 /// then recurses into each child's materialized rect (Р11 place pass). Per level:
 /// sum the inflexible track (fixed/fit_content preferred main + gaps), give the
