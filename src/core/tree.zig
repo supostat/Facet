@@ -1,9 +1,41 @@
 const std = @import("std");
+const measure = @import("measure.zig");
 
 /// The element vocabulary of the shadow tree. A plain stored discriminant; the
 /// extern-struct + comptime triple-check against the GPU Instance layout is
 /// Phase 13, not here.
 pub const Kind = enum { view, text };
+
+/// How the measure pass derives a node's preferred size. EXPLICIT per node (not
+/// derived from props): fixed contributes its given main_size/cross_size; flex
+/// reports a zero preferred main and grows from free space in the place pass;
+/// fit_content aggregates its children's preferred sizes (Р11, Ф9).
+pub const SizingMode = enum { fixed, flex, fit_content };
+
+/// A preferred size reported by the measure pass, in main/cross axis terms
+/// (never width/height — Р11). A measure callback returns this shape.
+pub const MeasuredSize = struct {
+    main: f32,
+    cross: f32,
+};
+
+/// An injected measure source for a leaf text node (Р10): the layout engine
+/// hands the proposed main-axis extent (wrap width) and the callback returns the
+/// resulting {main, cross} size. The function pointer keeps the platform/Core
+/// Text dependency out of the Zig core; tests inject a mock, Phase 14 wires the
+/// real Core Text seam. context carries the callee's state opaquely.
+pub const MeasureCallback = struct {
+    context: *anyopaque,
+    measure: *const fn (*anyopaque, []const u8, f32) MeasuredSize,
+};
+
+/// The per-node result of the measure pass, in main/cross terms (Р11). Default
+/// zero on every node so debug's per-node `preferred=` read is always defined,
+/// including on flex and root nodes the measure pass leaves at zero.
+pub const PreferredSize = struct {
+    main: f32 = 0,
+    cross: f32 = 0,
+};
 
 /// The main-axis orientation of a container's children. row lays children along
 /// x (main == horizontal); column lays them along y (main == vertical). The
@@ -57,6 +89,15 @@ pub const Node = struct {
     cross_size: ?f32 = null,
     cross_align: Align = .start,
 
+    // Measure-input/output fields (Phase 9). sizing_mode selects how the measure
+    // pass derives `preferred`; a .text node carries its string and a measure
+    // callback the pass invokes through the Tree's cache. preferred defaults to
+    // zero on EVERY node so debug's per-node read is defined before any measure.
+    sizing_mode: SizingMode = .fixed,
+    text: ?[]const u8 = null,
+    measure_callback: ?MeasureCallback = null,
+    preferred: PreferredSize = .{},
+
     layout: LayoutResult = .{},
 };
 
@@ -84,14 +125,25 @@ pub const PropsUpdate = struct {
 pub const Tree = struct {
     arena: std.heap.ArenaAllocator,
     nodes: std.AutoHashMap(u32, *Node),
+    measure_cache: measure.MeasureCache,
     next_id: u32,
 
     pub fn init(backing_allocator: std.mem.Allocator) Tree {
-        return .{
+        var tree: Tree = .{
             .arena = std.heap.ArenaAllocator.init(backing_allocator),
             .nodes = std.AutoHashMap(u32, *Node).init(backing_allocator),
+            .measure_cache = undefined,
             .next_id = 0,
         };
+        // The cache and every string it interns live in the arena, so they are
+        // freed wholesale by arena.deinit() with no independent deinit (the
+        // inverse of the nodes map, which is backing-allocator-owned). The arena
+        // allocator captured here points at this local arena; the measure pass
+        // rebinds the cache's allocator from the stable *Tree before any insert,
+        // since returning Tree by value relocates the arena (createNode does the
+        // same — it re-fetches self.arena.allocator() at its final address).
+        tree.measure_cache = measure.MeasureCache.init(tree.arena.allocator());
+        return tree;
     }
 
     pub fn deinit(self: *Tree) void {
@@ -174,6 +226,7 @@ fn childIndex(parent: *Node, child: *Node) usize {
 test {
     _ = @import("debug.zig");
     _ = @import("layout.zig");
+    _ = @import("measure.zig");
 }
 
 test "createNode assigns sequential ids resolvable via lookup" {

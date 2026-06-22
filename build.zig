@@ -228,13 +228,13 @@ pub fn build(b: *std.Build) void {
     shaper_test_run.expectExitCode(0);
 
     // The Block-II shadow-tree engine core: a NATIVE zig test artifact (no swiftc,
-    // no metallib). tree.zig pulls debug.zig's tests in via a co-located import,
-    // so this single addTest runs both modules' co-located test blocks.
+    // no metallib). tree.zig pulls debug.zig, layout.zig, and measure.zig tests in
+    // via co-located imports, so this single addTest runs every module's tests.
     const core_module = b.createModule(.{ .root_source_file = b.path("src/core/tree.zig"), .target = b.graph.host, .optimize = .Debug });
     const core_test = b.addTest(.{ .name = "core-test", .root_module = core_module });
     const core_test_run = b.addRunArtifact(core_test);
 
-    const test_step = b.step("test", "Run the Swift snapshot tests and the native Zig engine-core tests (tree, layout, debug; Metal validation ON)");
+    const test_step = b.step("test", "Run the Swift snapshot tests and the native Zig engine-core tests (tree, layout, measure, debug; Metal validation ON)");
     test_step.dependOn(&clear_test_run.step);
     test_step.dependOn(&sdf_test_run.step);
     test_step.dependOn(&phase3_test_run.step);

@@ -20,10 +20,13 @@ pub fn dump(tree: *Tree, writer: *std.Io.Writer, pretty: bool) std.Io.Writer.Err
     try collect(tree, writer, .shadow_tree, pretty);
 }
 
-/// Dumps the layout trace: per node, the available main/cross space it was laid
-/// into (recomputed from Node fields, NOT from layout.zig) and the emitted rect.
-/// This localizes a drifted coordinate to a node and step (spec §0a). Machine
-/// mode (pretty == false) is byte-deterministic; both modes share the same walk.
+/// Dumps the layout trace covering BOTH passes (Ф9): per node, the proposed main
+/// extent and reported preferred size from the measure pass, plus the available
+/// main/cross space it was laid into and the emitted rect from the place pass
+/// (all recomputed/read from Node fields, NOT from layout.zig or measure.zig —
+/// debug imports tree only). This localizes a drifted coordinate to a node AND a
+/// pass (spec §0a). Machine mode (pretty == false) is byte-deterministic; both
+/// modes share the same walk.
 pub fn dumpLayoutTrace(tree: *Tree, writer: *std.Io.Writer, pretty: bool) std.Io.Writer.Error!void {
     try collect(tree, writer, .layout_trace, pretty);
 }
@@ -100,7 +103,9 @@ fn projectExtents(direction: tree_module.Direction, width: f32, height: f32) Ava
 
 fn writeTraceMachine(node: *Node, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     const avail = availableSpace(node);
-    try writer.print("node id={d} avail=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT, .{ node.id, avail.main, avail.cross });
+    try writer.print("node id={d} proposed=" ++ FLOAT_FORMAT, .{ node.id, avail.main });
+    try writer.print(" preferred=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT, .{ node.preferred.main, node.preferred.cross });
+    try writer.print(" avail=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT, .{ avail.main, avail.cross });
     try writer.print(" rect=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "\n", .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
 }
 
@@ -108,7 +113,9 @@ fn writeTracePretty(node: *Node, writer: *std.Io.Writer, depth: usize) std.Io.Wr
     var indent: usize = 0;
     while (indent < depth) : (indent += 1) try writer.writeAll("  ");
     const avail = availableSpace(node);
-    try writer.print("#{d} avail=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")", .{ node.id, avail.main, avail.cross });
+    try writer.print("#{d} proposed=" ++ FLOAT_FORMAT, .{ node.id, avail.main });
+    try writer.print(" preferred=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")", .{ node.preferred.main, node.preferred.cross });
+    try writer.print(" avail=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")", .{ avail.main, avail.cross });
     try writer.print(" rect=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")\n", .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
 }
 
@@ -352,8 +359,8 @@ test "layout trace machine dump records avail and rect per node" {
     defer std.testing.allocator.free(trace);
 
     const expected =
-        "node id=0 avail=300.0000,100.0000 rect=0.0000,0.0000,300.0000,100.0000\n" ++
-        "node id=1 avail=280.0000,90.0000 rect=10.0000,5.0000,280.0000,90.0000\n";
+        "node id=0 proposed=300.0000 preferred=0.0000,0.0000 avail=300.0000,100.0000 rect=0.0000,0.0000,300.0000,100.0000\n" ++
+        "node id=1 proposed=280.0000 preferred=0.0000,0.0000 avail=280.0000,90.0000 rect=10.0000,5.0000,280.0000,90.0000\n";
     try std.testing.expectEqualStrings(expected, trace);
 }
 
@@ -398,8 +405,8 @@ test "layout trace pretty renders indented avail/rect with the column projection
     defer std.testing.allocator.free(pretty);
 
     const expected =
-        "#0 avail=(400.0000, 200.0000) rect=(0.0000, 0.0000, 200.0000, 400.0000)\n" ++
-        "  #1 avail=(380.0000, 184.0000) rect=(10.0000, 12.0000, 184.0000, 180.0000)\n";
+        "#0 proposed=400.0000 preferred=(0.0000, 0.0000) avail=(400.0000, 200.0000) rect=(0.0000, 0.0000, 200.0000, 400.0000)\n" ++
+        "  #1 proposed=380.0000 preferred=(0.0000, 0.0000) avail=(380.0000, 184.0000) rect=(10.0000, 12.0000, 184.0000, 180.0000)\n";
     try std.testing.expectEqualStrings(expected, pretty);
 }
 
@@ -416,7 +423,32 @@ test "layout trace enumerates two roots by ascending id" {
     defer std.testing.allocator.free(trace);
 
     const expected =
-        "node id=0 avail=200.0000,50.0000 rect=0.0000,0.0000,200.0000,50.0000\n" ++
-        "node id=1 avail=100.0000,80.0000 rect=0.0000,0.0000,100.0000,80.0000\n";
+        "node id=0 proposed=200.0000 preferred=0.0000,0.0000 avail=200.0000,50.0000 rect=0.0000,0.0000,200.0000,50.0000\n" ++
+        "node id=1 proposed=100.0000 preferred=0.0000,0.0000 avail=100.0000,80.0000 rect=0.0000,0.0000,100.0000,80.0000\n";
     try std.testing.expectEqualStrings(expected, trace);
+}
+
+test "layout trace shows the measured proposed extent and a non-zero preferred on a fit_content tree" {
+    var tree = Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    // A laid-out fit_content container around a child: the measure pass would
+    // report a non-zero preferred (here filled directly — debug imports neither
+    // measure nor layout) and the place pass the rect. The trace must surface a
+    // non-zero proposed= (the offered wrap width) and preferred= for both nodes.
+    const container = try tree.createNode(.view);
+    container.sizing_mode = .fit_content;
+    container.preferred = .{ .main = 120, .cross = 40 };
+    container.layout = .{ .x = 0, .y = 0, .w = 120, .h = 40 };
+    const child = try tree.createNode(.view);
+    child.preferred = .{ .main = 120, .cross = 40 };
+    child.layout = .{ .x = 0, .y = 0, .w = 120, .h = 40 };
+    try tree.appendChild(container, child);
+
+    const trace = try traceToString(&tree, false);
+    defer std.testing.allocator.free(trace);
+
+    try std.testing.expect(std.mem.indexOf(u8, trace, "node id=0 proposed=120.0000 preferred=120.0000,40.0000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "node id=1 proposed=120.0000 preferred=120.0000,40.0000") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "preferred=0.0000,0.0000") == null);
 }
