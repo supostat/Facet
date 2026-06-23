@@ -13,6 +13,10 @@ import QuartzCore
 //   --write-reference  headless: drive the Zig seam through the Renderer's
 //                      count-based capture to regenerate the two phase-13 goldens
 //                      (before + after mutation), then exit.
+//   --measure          headless: build the Ф14 MEASURE scene through the seam,
+//                      install the real Core Text callback, produce, and print the
+//                      fit-content container's seam-measured dimensions (the sized
+//                      SDF box hugging the text — legible glyphs deferred to 14b).
 //   (default)          open the live window; press M to mutate the reference tree.
 //
 // Named ZigTreeHarness.swift, NOT main.swift: a file literally named main.swift is
@@ -27,7 +31,42 @@ struct ZigTreeHarness {
             return
         }
 
+        if CommandLine.arguments.contains("--measure") {
+            printMeasureScene()
+            return
+        }
+
         runLiveWindow(metallibPath: metallibPath)
+    }
+
+    // КТ-2 Ф14: build the SEPARATE measure scene, install the production Core Text
+    // callback BEFORE producing (the install-order invariant), produce once, and
+    // print the fit-content label container's seam-measured main extent — the SDF
+    // box that hugs the measured text. No window and no golden: nothing legible
+    // renders until the Phase-14b glyph-injection half lands, so this surfaces the
+    // measured GEOMETRY as data, the eye-check of the upward measure seam.
+    private static func printMeasureScene() {
+        guard let handle = facet_seam_create() else {
+            fatalError("facet_seam_create returned null")
+        }
+        defer { facet_seam_destroy(handle) }
+
+        let status = facet_seam_set_measure_callback(handle, facetMeasureText)
+        precondition(status == 0, "facet_seam_set_measure_callback rejected the callback (status \(status))")
+
+        let rootId = facet_seam_build_measure_tree(handle)
+        precondition(rootId != UInt32.max, "facet_seam_build_measure_tree failed")
+
+        var buffer = [FacetInstance](repeating: FacetInstance(), count: 16)
+        buffer.withUnsafeMutableBufferPointer { pointer in
+            _ = facet_seam_set_base_pointer(handle, pointer.baseAddress, UInt32(pointer.count))
+            _ = facet_seam_give_instances(handle, rootId, Float(ReferenceZigTree.width), Float(ReferenceZigTree.height))
+        }
+
+        let containerMain = facet_seam_node_laid_out_main(handle, rootId + ReferenceZigTree.measureLabelContainerIdOffset)
+        let crossings = facet_seam_measure_crossings(handle)
+        print("measure scene: \"\(ReferenceZigTree.measureString)\" at \(ReferenceZigTree.measureFontSize)pt")
+        print("  fit-content container hugs a measured main of \(containerMain)px after \(crossings) seam crossing(s)")
     }
 
     // Drives the Zig seam straight into the renderer's shared buffer and captures

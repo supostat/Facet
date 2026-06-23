@@ -26,6 +26,7 @@ const app_sources = [_][]const u8{
     "src/platform/AtlasInspector.swift",
     "src/platform/TextLayout.swift",
     "src/platform/Shaper.swift",
+    "src/platform/MeasureCallback.swift",
     "src/platform/Renderer.swift",
     "src/platform/Bridge.swift",
     "src/platform/FrameLoop.swift",
@@ -112,6 +113,8 @@ const zig_tree_sources = [_][]const u8{
     "src/platform/Atlas.swift",
     "src/platform/AtlasInspector.swift",
     "src/platform/TextLayout.swift",
+    "src/platform/Shaper.swift",
+    "src/platform/MeasureCallback.swift",
     "src/platform/Renderer.swift",
     "src/platform/Bridge.swift",
     "src/platform/FrameLoop.swift",
@@ -132,12 +135,34 @@ const lower_seam_test_sources = [_][]const u8{
     "src/platform/Atlas.swift",
     "src/platform/AtlasInspector.swift",
     "src/platform/TextLayout.swift",
+    "src/platform/Shaper.swift",
+    "src/platform/MeasureCallback.swift",
     "src/platform/Renderer.swift",
     "src/platform/Bridge.swift",
     "tests/snapshots/PngImage.swift",
     "tests/snapshots/SnapshotComparator.swift",
     "tests/snapshots/ReferenceZigTree.swift",
     "tests/e2e/LowerSeamEndToEndTests.swift",
+};
+
+// The Ф14 measure-seam end-to-end test: drives the UPWARD measure seam directly
+// through the C exports — install the production Core Text callback, build the
+// SEPARATE measure scene, produce into a stack instance buffer, and assert the
+// measured metrics as DATA checks at the seam end (seam-fidelity, cache-bypass
+// crossings, fit-content geometry, empty-string). MEASURE-ONLY: no glyph pixels,
+// no golden, so it constructs no Renderer and loads no metallib. A seam consumer
+// (links the core lib + header) — it needs Shaper (the callback + Shaper.measure)
+// and Instance (the FacetInstance buffer), plus the shared ReferenceZigTree fixtures.
+const measure_seam_test_sources = [_][]const u8{
+    "src/platform/Instance.swift",
+    "src/platform/ShelfPacker.swift",
+    "src/platform/GlyphRasterizer.swift",
+    "src/platform/Atlas.swift",
+    "src/platform/AtlasInspector.swift",
+    "src/platform/Shaper.swift",
+    "src/platform/MeasureCallback.swift",
+    "tests/snapshots/ReferenceZigTree.swift",
+    "tests/e2e/MeasureSeamEndToEndTests.swift",
 };
 
 // CoreText is required by GlyphRasterizer (the only Core Text imaging site);
@@ -284,6 +309,14 @@ pub fn build(b: *std.Build) void {
     const lower_seam_test_run = runBinary(b, lower_seam_test_binary, metallib, true);
     lower_seam_test_run.expectExitCode(0);
 
+    // The Ф14 measure-seam end-to-end test: a seam consumer (links the core lib +
+    // header) that drives the UPWARD measure seam through the C exports and asserts
+    // the measured metrics as DATA checks. It constructs no Renderer and samples no
+    // atlas, so it loads NO metallib (like the atlas logic test).
+    const measure_seam_test_binary = compileSwift(b, "measure-seam-e2e-test", &measure_seam_test_sources, .debug, core_lib);
+    const measure_seam_test_run = runBinaryWithoutMetallib(b, measure_seam_test_binary, true);
+    measure_seam_test_run.expectExitCode(0);
+
     // The Block-II shadow-tree engine core: a NATIVE zig test artifact (no swiftc,
     // no metallib). tree.zig pulls debug.zig, layout.zig, measure.zig, dirty.zig,
     // hit_test.zig, and instances.zig tests in via co-located imports, so this
@@ -310,6 +343,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&text_test_run.step);
     test_step.dependOn(&shaper_test_run.step);
     test_step.dependOn(&lower_seam_test_run.step);
+    test_step.dependOn(&measure_seam_test_run.step);
     test_step.dependOn(&core_test_run.step);
     test_step.dependOn(&seam_test_run.step);
 }

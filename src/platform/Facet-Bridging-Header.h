@@ -40,6 +40,31 @@ typedef struct {
     float atlasMaxV;
 } FacetInstance;
 
+// The C mirror of the Zig `MeasureRequest`/`MeasureResult` extern structs
+// (measure_seam.zig) — the UPWARD half of the lower seam (Ф14, Р10). The Zig core
+// asks Swift to measure a text run with real Core Text and reads metrics back. The
+// field names, types, and order are the frozen contract pinned by the Zig comptime
+// layout assertion (MeasureRequest 24 bytes / 8-align, offsets {bytes:0, length:8,
+// font_size:16, proposed_main:20}; MeasureResult 8 bytes / 4-align, {main:0,
+// cross:4}). The `bytes` pointer is a zero-copy borrow valid only within the call —
+// Swift decodes a String and never retains it.
+typedef struct {
+    const uint8_t *bytes;
+    size_t length;
+    float font_size;
+    float proposed_main;
+} FacetMeasureRequest;
+
+typedef struct {
+    float main;
+    float cross;
+} FacetMeasureResult;
+
+// The measure callback Swift installs into the seam: given a request, fill a
+// result. Invoked by the Zig measure pass on a cache miss (a real Zig->Swift
+// crossing); a cache hit bypasses it (the anti-chatty-seam guarantee).
+typedef void (*FacetMeasureCallback)(const FacetMeasureRequest *request, FacetMeasureResult *result);
+
 // The C decls for the Zig callconv(.c) exports (instance_seam.zig). The seam owns
 // the shadow tree + instance producer behind an opaque handle; Swift drives the
 // per-frame has-changed -> give-instances loop and hands a StorageModeShared
@@ -80,5 +105,25 @@ uint32_t facet_seam_last_recomputed(void *handle);
 // The instance count the last give-instances wrote (the draw count to re-bind on a
 // static frame without re-producing).
 uint32_t facet_seam_last_count(void *handle);
+
+// Install the Ф14 measure callback (the Swift Core Text seam) into the seam's live
+// slot. Rejects a null fn / null handle with a negative status; returns 0 on
+// success. MUST be called before the first give-instances that measures the scene.
+int facet_seam_set_measure_callback(void *handle, FacetMeasureCallback callback);
+
+// The count of real Zig->Swift measure crossings so far (cache misses). A repeated
+// (string, width) is a cache hit that bypasses the seam, so this stays 1 across two
+// produces of the static measure scene. 0 on a null handle.
+uint32_t facet_seam_measure_crossings(void *handle);
+
+// Build the Ф14 measure scene — a fit-content container hugging a single text leaf
+// sized by the measure seam — returning its root id (UINT32_MAX on allocation
+// failure). Separate from the Phase-13 reference tree.
+uint32_t facet_seam_build_measure_tree(void *handle);
+
+// The seam-measured main-axis extent of a node (the laid-out rect width of node_id;
+// the measure scene's label container is a row, so main == width). After a produce
+// this hugs the real Core-Text-measured text width. 0 on a null handle / unknown id.
+float facet_seam_node_laid_out_main(void *handle, uint32_t node_id);
 
 #endif

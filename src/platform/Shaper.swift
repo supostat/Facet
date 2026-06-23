@@ -104,6 +104,28 @@ enum Shaper {
         return instances
     }
 
+    // Measures a single line of text with Core Text for the Ф14 UPWARD measure seam
+    // (Р10): the typographic WIDTH is the main-axis extent, ascent + descent +
+    // leading the cross-axis extent. `CTLineGetTypographicBounds` returns the width
+    // as its Double return value and writes the three vertical metrics through
+    // out-params (the Ф6 measure precedent). An empty string produces a line with no
+    // runs and zero bounds → (0, 0), the contract's empty-string result. This is the
+    // SAME Core Text path the production `facetMeasureText` callback drives, so the
+    // e2e seam-fidelity assert (Swift-measured == Zig-measured) holds by construction.
+    static func measure(string: String, font: CTFont) -> (main: CGFloat, cross: CGFloat) {
+        if string.isEmpty {
+            return (0, 0)
+        }
+        let attributes = [kCTFontAttributeName: font] as CFDictionary
+        let attributed = CFAttributedStringCreate(nil, string as CFString, attributes)!
+        let line = CTLineCreateWithAttributedString(attributed)
+        var ascent: CGFloat = 0
+        var descent: CGFloat = 0
+        var leading: CGFloat = 0
+        let width = CTLineGetTypographicBounds(line, &ascent, &descent, &leading)
+        return (main: CGFloat(width), cross: ascent + descent + leading)
+    }
+
     // The run always carries the font attribute we set on the whole string, so a
     // missing attribute is a construction bug — the force-cast traps rather than
     // masking it with a fallback.
@@ -132,4 +154,9 @@ enum Shaper {
         CTRunGetAdvances(run, CFRange(location: 0, length: 0), &advances)
         return advances
     }
+
+    // The fixed family the measure seam resolves a CTFont from (Ф14 deviation a —
+    // fixed family Swift-side, the MeasureRequest carries only the point size).
+    // Matches the existing proportional reference text family.
+    static let measureFontName = "Helvetica"
 }

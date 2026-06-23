@@ -4,11 +4,14 @@ const layout = @import("layout.zig");
 const dirty = @import("dirty.zig");
 const hit_test = @import("hit_test.zig");
 const instances = @import("instances.zig");
+const measure_seam = @import("measure_seam.zig");
 const Tree = tree.Tree;
 const Node = tree.Node;
 const Instance = instances.Instance;
 const InstanceProducer = instances.InstanceProducer;
 const ExternalTarget = instances.ExternalTarget;
+const MeasureFn = measure_seam.MeasureFn;
+const MeasureContext = measure_seam.MeasureContext;
 
 // instance_seam.zig is the OUTERMOST core module: the only .zig that imports
 // layout/dirty/hit_test/instances/tree together, and the only one carrying
@@ -81,6 +84,11 @@ fn assertInstanceLayout() void {
 
 comptime {
     assertInstanceLayout();
+    // Reference the measure-seam contract's layout assertion from THIS module's
+    // root comptime block too: a drifted MeasureRequest/MeasureResult offset then
+    // fails the static-LIBRARY compile (instance_seam is the lib root), not only
+    // measure_seam's native test. Mirrors the instance-layout gate above (Ф13/Ф14).
+    measure_seam.assertMeasureLayoutAtBuild();
 }
 
 /// The opaque seam handle Swift holds as a `*anyopaque`. It owns the shadow tree,
@@ -104,6 +112,18 @@ const Seam = struct {
     last_produced_epoch: u64,
     last_count: u32,
     last_recomputed: u32,
+    /// The Ф14 UPWARD-seam callback slot: the Core Text measure fn Swift installs
+    /// via facet_seam_set_measure_callback, read LIVE at measure time. Each text
+    /// node's MeasureContext holds `&seam.measure_fn` (a pointer to THIS slot), so
+    /// installing after the tree is built needs no tree-walk patch. `null` until
+    /// installed; a measure with a null slot is a CHECKED `orelse unreachable`
+    /// panic under .ReleaseSafe (the install-order invariant must hold).
+    measure_fn: ?MeasureFn,
+    /// The MeasureContext each text node's MeasureCallback points into. Owned by
+    /// the seam (not the arena) and pinned at a stable address so `&seam.measure_fn`
+    /// inside it stays valid for the seam's lifetime; a single fit-content label is
+    /// the only text node in the measure scene, so one context suffices.
+    measure_context: MeasureContext,
 };
 
 /// The drawable extent the reference tree is laid out into — the КТ-2 / e2e scene
@@ -128,6 +148,11 @@ export fn facet_seam_create() callconv(.c) ?*anyopaque {
         .last_produced_epoch = 0,
         .last_count = 0,
         .last_recomputed = 0,
+        .measure_fn = null,
+        // The slot pointer is wired to THIS seam's stable measure_fn here, so the
+        // measure scene's text node can point its MeasureContext at the seam field.
+        // font_size is overwritten per text node at build (it is a scene fixture).
+        .measure_context = .{ .measure_fn_slot = &seam.measure_fn, .font_size = 0 },
     };
     return seam;
 }
@@ -154,6 +179,29 @@ export fn facet_seam_set_base_pointer(handle: ?*anyopaque, base: ?[*]Instance, c
     if (capacity == 0) return -1;
     seam.target = .{ .base = base_pointer, .capacity = capacity };
     return 0;
+}
+
+/// Installs the Ф14 measure callback (the Swift Core Text seam, or a Zig stub in
+/// host-native tests) into the seam's live slot. Rejects a null fn pointer with a
+/// non-zero status (the slot stays unchanged); on success stores it and returns 0.
+/// The per-node MeasureContext already points at `&seam.measure_fn`, so the value
+/// is read live at the next measure — no tree-walk patch. MUST be called BEFORE the
+/// first give-instances that measures the scene (the install-order invariant).
+export fn facet_seam_set_measure_callback(handle: ?*anyopaque, callback: ?MeasureFn) callconv(.c) c_int {
+    const seam = cast(handle) orelse return -1;
+    const measure_fn = callback orelse return -1;
+    seam.measure_fn = measure_fn;
+    return 0;
+}
+
+/// The count of real Zig→Swift measure crossings so far — the cache MISSES. A
+/// repeated (string, width) is a cache HIT that bypasses the seam and does NOT
+/// increment this (the anti-chatty-seam guarantee, Р10/§4), so the e2e asserts it
+/// stays 1 across two produces of the static measure scene. Reads the single
+/// authority (the Tree's MeasureCache invocation counter); 0 on a null handle.
+export fn facet_seam_measure_crossings(handle: ?*anyopaque) callconv(.c) u32 {
+    const seam = cast(handle) orelse return 0;
+    return @intCast(seam.tree.measure_cache.invocation_count);
 }
 
 /// Lays out the tree rooted at root_id, runs the dirty recompute for the frame
@@ -208,6 +256,22 @@ export fn facet_seam_build_reference_tree(handle: ?*anyopaque) callconv(.c) u32 
     return root.id;
 }
 
+/// Builds the Ф14 MEASURE scene — a fit-content container hugging a single .text
+/// leaf whose size is resolved by the measure seam (NOT the Phase-13 band scene).
+/// Registers the root, reserves the producer slot map, bumps the epoch, and returns
+/// the root id (max u32 sentinel on allocation failure). SEPARATE from
+/// facet_seam_build_reference_tree so the Phase-13 scene + its goldens stay
+/// byte-untouched. The text node's MeasureContext points at the seam's measure_fn
+/// slot, so a callback installed afterward is read live.
+export fn facet_seam_build_measure_tree(handle: ?*anyopaque) callconv(.c) u32 {
+    const seam = cast(handle) orelse return std.math.maxInt(u32);
+    const root = buildMeasureReferenceTree(seam) catch return std.math.maxInt(u32);
+    seam.root = root;
+    seam.producer.slots.ensureTotalCapacity(seam.tree.next_id) catch return std.math.maxInt(u32);
+    seam.epoch += 1;
+    return root.id;
+}
+
 /// Applies a paint-only mutation to the reference tree (recolors the top band) and
 /// bumps the epoch so the next has-changed reports a change. Paint-only, so no node
 /// is inserted and the reserved slot map still covers the tree.
@@ -216,6 +280,17 @@ export fn facet_seam_mutate_reference(handle: ?*anyopaque) callconv(.c) void {
     const root = seam.root orelse return;
     mutateReference(root);
     seam.epoch += 1;
+}
+
+/// The seam-measured main-axis extent of a node, read back for the Ф14 fit-content
+/// GEOMETRY check: the laid-out rect width of the node id (the measure scene's
+/// label container is a ROW, so its main axis is horizontal == the rect width).
+/// After a produce, this hugs the real Core-Text-measured text width. Returns 0 for
+/// a null handle or unknown id (the boundary no-op).
+export fn facet_seam_node_laid_out_main(handle: ?*anyopaque, node_id: u32) callconv(.c) f32 {
+    const seam = cast(handle) orelse return 0;
+    const node = seam.tree.lookup(node_id) orelse return 0;
+    return node.layout.w;
 }
 
 /// The node count the last give-instances recomputed — a Phase-13 frame-stat input
@@ -305,6 +380,67 @@ const ROOT_COLOR = Rgb{ .r = 0.08, .g = 0.09, .b = 0.12 };
 const TOP_COLOR = Rgb{ .r = 0.92, .g = 0.20, .b = 0.55 };
 const BOTTOM_COLOR = Rgb{ .r = 0.10, .g = 0.78, .b = 0.74 };
 const MUTATED_TOP_COLOR = Rgb{ .r = 0.30, .g = 0.55, .b = 0.90 };
+
+/// The Ф14 measure scene fixtures: the caption string the seam measures and the
+/// point size the node hands the seam (deviation a — fixed family Swift-side, the
+/// node names the size). The Swift ReferenceZigTree mirrors these so the
+/// seam-fidelity + fit-content geometry asserts measure the SAME bytes + size.
+const MEASURE_STRING = "Facet";
+const MEASURE_FONT_SIZE: f32 = 32;
+const MEASURE_LABEL_COLOR = Rgb{ .r = 0.90, .g = 0.92, .b = 0.96 };
+
+/// Builds the SEPARATE measure scene: a fixed full-frame root with a single
+/// fit-content label container that hugs a .text leaf. The leaf carries its string,
+/// its font size, and a MeasureCallback whose adapter is measureThroughSeam and
+/// whose context is the seam-owned MeasureContext (pointing at the live measure_fn
+/// slot). After the measure pass the label container's `preferred.main` == the
+/// seam-measured text main; because the container is a fit_content CHILD (not the
+/// root), the place pass sizes its laid-out rect to that preference — so
+/// `label_container.layout.w` is the SDF box hugging the measured text width (the
+/// legible glyph render is deferred to Phase 14b). NOT the Phase-13 band scene.
+fn buildMeasureReferenceTree(seam: *Seam) std.mem.Allocator.Error!*Node {
+    const t = &seam.tree;
+    // The fixed full-frame root: a ROW that places its single fit-content child at
+    // the top-left. Row so the child's main axis (horizontal, the measured text
+    // width) maps to the child's laid-out rect WIDTH — the hugging box the geometry
+    // check reads. The root rect is the whole drawable; the label container hugs.
+    const root = try t.createNode(.view);
+    root.direction = .row;
+    root.sizing_mode = .fixed;
+    root.main_size = REFERENCE_WIDTH;
+    root.cross_size = REFERENCE_HEIGHT;
+    root.cross_align = .start;
+    root.color_r = ROOT_COLOR.r;
+    root.color_g = ROOT_COLOR.g;
+    root.color_b = ROOT_COLOR.b;
+    root.color_a = 1;
+
+    // The fit-content label container: a row hugging the text leaf. As a fit_content
+    // CHILD its laid-out rect is sized to its measured preference (the place pass
+    // reads child.preferred for fit_content), so its rect hugs the measured text.
+    const label_container = try t.createNode(.view);
+    label_container.direction = .row;
+    label_container.sizing_mode = .fit_content;
+    label_container.cross_align = .start;
+    label_container.color_r = MEASURE_LABEL_COLOR.r;
+    label_container.color_g = MEASURE_LABEL_COLOR.g;
+    label_container.color_b = MEASURE_LABEL_COLOR.b;
+    label_container.color_a = 1;
+    try t.appendChild(root, label_container);
+
+    const label = try t.createNode(.text);
+    label.sizing_mode = .fit_content;
+    label.text = MEASURE_STRING;
+    label.font_size = MEASURE_FONT_SIZE;
+    seam.measure_context.font_size = MEASURE_FONT_SIZE;
+    label.measure_callback = .{
+        .context = &seam.measure_context,
+        .measure = measure_seam.measureThroughSeam,
+    };
+    try t.appendChild(label_container, label);
+
+    return root;
+}
 
 const testing = std.testing;
 
@@ -447,4 +583,83 @@ test "a static frame recomputes zero nodes and last-recomputed reports it" {
     _ = facet_seam_give_instances(handle, root_id, REFERENCE_WIDTH, REFERENCE_HEIGHT);
     try testing.expectEqual(@as(u32, 0), facet_seam_last_recomputed(handle));
     try testing.expectEqual(@as(u32, 3), facet_seam_last_count(handle));
+}
+
+/// A Zig stub MeasureFn standing in for the Swift Core Text seam in host-native
+/// measure-scene tests (deviation c — real Core Text is host-unavailable). It
+/// returns a width proportional to length × font size and a height of the font
+/// size, deterministic so the scene asserts are exact.
+const STUB_MAIN_PER_UNIT: f32 = 0.6;
+
+fn stubMeasureCallback(request: *const measure_seam.MeasureRequest, result: *measure_seam.MeasureResult) callconv(.c) void {
+    result.* = .{
+        .main = @as(f32, @floatFromInt(request.length)) * request.font_size * STUB_MAIN_PER_UNIT,
+        .cross = request.font_size,
+    };
+}
+
+fn expectedStubMain() f32 {
+    return @as(f32, @floatFromInt(MEASURE_STRING.len)) * MEASURE_FONT_SIZE * STUB_MAIN_PER_UNIT;
+}
+
+test "the measure scene sizes the text leaf and the hugging container through the installed seam callback" {
+    const handle = createSeam();
+    defer facet_seam_destroy(handle);
+
+    // Install the stub BEFORE the first produce (the install-order invariant: a
+    // measure with a null slot is a checked panic).
+    try testing.expectEqual(@as(c_int, 0), facet_seam_set_measure_callback(handle, stubMeasureCallback));
+
+    const root_id = facet_seam_build_measure_tree(handle);
+    try testing.expect(root_id != std.math.maxInt(u32));
+
+    var buffer: [16]Instance = undefined;
+    _ = facet_seam_set_base_pointer(handle, &buffer, buffer.len);
+    _ = facet_seam_give_instances(handle, root_id, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+
+    // The text leaf is id 2 (root 0, label container 1, text leaf 2); it measured
+    // through the seam to the stub's size and recorded the crossing provenance.
+    const seam = cast(handle).?;
+    const label = seam.tree.lookup(2).?;
+    try testing.expectEqual(MEASURE_STRING, label.text.?);
+    try testing.expectEqual(expectedStubMain(), label.preferred.main);
+    try testing.expectEqual(MEASURE_FONT_SIZE, label.preferred.cross);
+    try testing.expectEqual(tree.MeasureSource.seam_cross, label.measure_source);
+
+    // The fit-content label container (id 1) is sized to hug the measured text: its
+    // laid-out main extent (a row → the rect width) equals the seam-measured main.
+    try testing.expectEqual(expectedStubMain(), facet_seam_node_laid_out_main(handle, root_id + 1));
+}
+
+test "the measure crossing counter stays one after two produces of the static measure scene" {
+    const handle = createSeam();
+    defer facet_seam_destroy(handle);
+
+    try testing.expectEqual(@as(c_int, 0), facet_seam_set_measure_callback(handle, stubMeasureCallback));
+    const root_id = facet_seam_build_measure_tree(handle);
+    var buffer: [16]Instance = undefined;
+    _ = facet_seam_set_base_pointer(handle, &buffer, buffer.len);
+
+    _ = facet_seam_give_instances(handle, root_id, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+    // The second produce re-measures the same (string, width): an all-HIT, so the
+    // seam is bypassed and the crossing counter does NOT increment past one.
+    _ = facet_seam_give_instances(handle, root_id, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+    try testing.expectEqual(@as(u32, 1), facet_seam_measure_crossings(handle));
+}
+
+test "set-measure-callback rejects a null fn and is a no-op on a null handle, and crossings reads zero before any measure" {
+    const handle = createSeam();
+    defer facet_seam_destroy(handle);
+
+    // A null fn pointer is rejected (the slot stays null); a valid one is accepted.
+    try testing.expect(facet_seam_set_measure_callback(handle, null) < 0);
+    try testing.expectEqual(@as(c_int, 0), facet_seam_set_measure_callback(handle, stubMeasureCallback));
+
+    // A null handle is a distinct boundary no-op on every measure export.
+    try testing.expect(facet_seam_set_measure_callback(null, stubMeasureCallback) < 0);
+    try testing.expectEqual(@as(u32, 0), facet_seam_measure_crossings(null));
+    try testing.expectEqual(@as(f32, 0), facet_seam_node_laid_out_main(null, 0));
+
+    // No produce yet → no crossing.
+    try testing.expectEqual(@as(u32, 0), facet_seam_measure_crossings(handle));
 }

@@ -38,6 +38,15 @@ final class Bridge {
         precondition(rootId != UInt32.max, "facet_seam_build_reference_tree failed to build the tree")
         self.rootId = rootId
 
+        // Install the Ф14 measure callback AFTER the tree is built and BEFORE the
+        // first produce (the install-order invariant): build_*_tree does not
+        // measure, so the callback need not exist yet, but the first produce drives
+        // the measure pass and a measure with a null seam slot is a checked panic.
+        // The Phase-13 reference tree has no text node so it never crosses; a measure
+        // scene built later through the same seam finds the callback already live.
+        let measureStatus = facet_seam_set_measure_callback(handle, facetMeasureText)
+        precondition(measureStatus == 0, "facet_seam_set_measure_callback rejected the callback (status \(measureStatus))")
+
         rehandBase()
     }
 

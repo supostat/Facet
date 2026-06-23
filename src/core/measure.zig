@@ -5,6 +5,7 @@ const Node = tree.Node;
 const Direction = tree.Direction;
 const SizingMode = tree.SizingMode;
 const MeasuredSize = tree.MeasuredSize;
+const MeasureSource = tree.MeasureSource;
 const PreferredSize = tree.PreferredSize;
 
 /// A `(string, proposed main extent) -> MeasuredSize` memoization for text-node
@@ -44,26 +45,37 @@ pub const MeasureCache = struct {
         };
     }
 
-    /// Returns the measured size for (text, proposed_main), invoking callback and
-    /// caching on a miss, returning the cached value with NO callback crossing on
-    /// a hit. On a miss the text is duped into the arena (via the managed map's own
-    /// allocator, which `measure()` rebinds from the stable *Tree) and the DUPED
-    /// slice is stored as the key, never the caller's transient slice (whose
-    /// backing may outlive nothing the cache controls).
+    /// A measured size paired with its provenance: `.cache_hit` when the (text,
+    /// width) key was served from the cache without crossing the seam, or
+    /// `.seam_cross` when the callback was invoked on a miss (a real Zig→Swift
+    /// transition). `measureNode` writes the source onto the node so debug surfaces
+    /// it and the e2e proves the cache HIT bypasses the seam (Р10 anti-chatty-seam).
+    const CachedMeasure = struct {
+        size: MeasuredSize,
+        source: MeasureSource,
+    };
+
+    /// Returns the measured size for (text, proposed_main) WITH its provenance,
+    /// invoking callback and caching on a miss (`.seam_cross`), returning the
+    /// cached value with NO callback crossing on a hit (`.cache_hit`). On a miss
+    /// the text is duped into the arena (via the managed map's own allocator, which
+    /// `measure()` rebinds from the stable *Tree) and the DUPED slice is stored as
+    /// the key, never the caller's transient slice (whose backing may outlive
+    /// nothing the cache controls).
     fn measureCached(
         self: *MeasureCache,
         callback: tree.MeasureCallback,
         text: []const u8,
         proposed_main: f32,
-    ) std.mem.Allocator.Error!MeasuredSize {
+    ) std.mem.Allocator.Error!CachedMeasure {
         const probe = Key{ .text = text, .proposed_main = proposed_main };
-        if (self.entries.get(probe)) |cached| return cached;
+        if (self.entries.get(probe)) |cached| return .{ .size = cached, .source = .cache_hit };
 
         const measured = callback.measure(callback.context, text, proposed_main);
         const interned = try self.entries.allocator.dupe(u8, text);
         try self.entries.put(.{ .text = interned, .proposed_main = proposed_main }, measured);
         self.invocation_count += 1;
-        return measured;
+        return .{ .size = measured, .source = .seam_cross };
     }
 };
 
@@ -95,7 +107,8 @@ fn measureNode(t: *Tree, node: *Node, proposed_main: f32) std.mem.Allocator.Erro
     if (node.text) |string| {
         const callback = node.measure_callback orelse unreachable;
         const measured = try t.measure_cache.measureCached(callback, string, proposed_main);
-        node.preferred = .{ .main = measured.main, .cross = measured.cross };
+        node.preferred = .{ .main = measured.size.main, .cross = measured.size.cross };
+        node.measure_source = measured.source;
         return;
     }
 
@@ -211,6 +224,26 @@ test "cache hit does not re-invoke the callback for the same string and width" {
     try testing.expectEqual(@as(usize, 1), mock.crossings);
     try testing.expectEqual(first.main, leaf.preferred.main);
     try testing.expectEqual(first.cross, leaf.preferred.cross);
+}
+
+test "the first measure crosses the seam and a repeated identical key is a cache hit that does not cross" {
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    var mock = MockMeasure{ .fixed_main = 80 };
+
+    const leaf = try textLeaf(&t, &mock, "hello");
+
+    try measure(&t, leaf, 200);
+    // The first measure of a (string, width) crosses the seam and is recorded as such.
+    try testing.expectEqual(MeasureSource.seam_cross, leaf.measure_source);
+    try testing.expectEqual(@as(usize, 1), mock.crossings);
+
+    try measure(&t, leaf, 200);
+    // A repeated identical key is served from the cache: the provenance flips to
+    // .cache_hit and the crossing counter does NOT increment (the seam is bypassed).
+    try testing.expectEqual(MeasureSource.cache_hit, leaf.measure_source);
+    try testing.expectEqual(@as(usize, 1), mock.crossings);
+    try testing.expectEqual(@as(usize, 1), t.measure_cache.invocation_count);
 }
 
 test "distinct proposed widths are distinct keys and each crosses once" {

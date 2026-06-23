@@ -53,4 +53,24 @@ enum ReferenceZigTree {
     // an adjacent band can bleed a step; a small slack keeps the assert robust while
     // still catching a whole-band color swap (which is dozens of steps off).
     static let spotTolerance: UInt8 = 3
+
+    // The Ф14 measure scene fixtures, kept in lock-step with the Zig
+    // MEASURE_STRING / MEASURE_FONT_SIZE constants and the Shaper.measureFontName
+    // (instance_seam.zig + Shaper.swift). The measure-only e2e measures the SAME
+    // bytes + family + size through both the production seam callback and an
+    // independent Swift Shaper.measure, so the two must agree by construction.
+    static let measureString = "Facet"
+    static let measureFontName = "Helvetica"
+    static let measureFontSize: CGFloat = 32
+
+    // The fit-content label container is the second node the Zig measure scene
+    // creates (root id, then this container, then the text leaf), so its id is the
+    // root id + 1. The geometry check reads its laid-out main extent (a row → the
+    // rect width) back through facet_seam_node_laid_out_main.
+    static let measureLabelContainerIdOffset: UInt32 = 1
+
+    // The float tolerance the seam-fidelity / geometry asserts allow: both sides
+    // call the identical Core Text path so they agree to the bit, but a tiny slack
+    // absorbs any Float<->CGFloat round without weakening the whole-measure check.
+    static let measureTolerance: Float = 0.01
 }

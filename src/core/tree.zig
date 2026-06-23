@@ -19,6 +19,14 @@ pub const MeasuredSize = struct {
     cross: f32,
 };
 
+/// The provenance of a node's last measure (Ф14 debug marker): `.unmeasured`
+/// before any measure pass touches it, `.cache_hit` when a repeated (string,
+/// width) key was served from the Zig-side MeasureCache without crossing the
+/// seam, `.seam_cross` when the measure pass invoked the callback (a real
+/// Zig→Swift Core Text crossing on a cache miss). A Node field (not a side
+/// table) so debug.zig reads provenance directly while importing only tree.zig.
+pub const MeasureSource = enum { unmeasured, cache_hit, seam_cross };
+
 /// An injected measure source for a leaf text node (Р10): the layout engine
 /// hands the proposed main-axis extent (wrap width) and the callback returns the
 /// resulting {main, cross} size. The function pointer keeps the platform/Core
@@ -144,6 +152,17 @@ pub const Node = struct {
     sizing_mode: SizingMode = .fixed,
     text: ?[]const u8 = null,
     measure_callback: ?MeasureCallback = null,
+    // The point size a .text node hands the measure seam (Ф14 deviation a): the
+    // node names its own font size so the MeasureRequest carries it to Core Text
+    // (fixed family Swift-side). Default zero; like placed_glyphs/shadow/border it
+    // is NOT a host prop — excluded from PropsUpdate/render_props so it never
+    // touches the dirty.zig render_props↔classify lock.
+    font_size: f32 = 0,
+    // The provenance of this node's last measure (Ф14 debug marker). Default
+    // .unmeasured so debug's per-node `measure=` read is defined before any pass;
+    // measure.zig writes it on each measure. Excluded from PropsUpdate/render_props
+    // for the same reason as font_size above.
+    measure_source: MeasureSource = .unmeasured,
     // The shaped, placed glyphs of a .text node (Phase 12), the seam instance
     // production expands into one glyph Instance each. null on a fresh node and
     // on every .view node; Phase 14 wires the real Core Text shaper.
@@ -306,6 +325,7 @@ test {
     _ = @import("debug.zig");
     _ = @import("layout.zig");
     _ = @import("measure.zig");
+    _ = @import("measure_seam.zig");
     _ = @import("dirty.zig");
     _ = @import("hit_test.zig");
     _ = @import("instances.zig");

@@ -122,7 +122,8 @@ fn writeTraceMachine(node: *Node, writer: *std.Io.Writer) std.Io.Writer.Error!vo
     try writer.print("node id={d} proposed=" ++ FLOAT_FORMAT, .{ node.id, avail.main });
     try writer.print(" preferred=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT, .{ node.preferred.main, node.preferred.cross });
     try writer.print(" avail=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT, .{ avail.main, avail.cross });
-    try writer.print(" rect=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "\n", .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
+    try writer.print(" rect=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT, .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
+    try writer.print(" measure={s}\n", .{@tagName(node.measure_source)});
 }
 
 fn writeTracePretty(node: *Node, writer: *std.Io.Writer, depth: usize) std.Io.Writer.Error!void {
@@ -132,7 +133,8 @@ fn writeTracePretty(node: *Node, writer: *std.Io.Writer, depth: usize) std.Io.Wr
     try writer.print("#{d} proposed=" ++ FLOAT_FORMAT, .{ node.id, avail.main });
     try writer.print(" preferred=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")", .{ node.preferred.main, node.preferred.cross });
     try writer.print(" avail=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")", .{ avail.main, avail.cross });
-    try writer.print(" rect=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")\n", .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
+    try writer.print(" rect=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")", .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
+    try writer.print(" measure={s}\n", .{@tagName(node.measure_source)});
 }
 
 /// The overlay machine line: element bounds, dirty flags, and the hit rect, all
@@ -459,8 +461,8 @@ test "layout trace machine dump records avail and rect per node" {
     defer std.testing.allocator.free(trace);
 
     const expected =
-        "node id=0 proposed=300.0000 preferred=0.0000,0.0000 avail=300.0000,100.0000 rect=0.0000,0.0000,300.0000,100.0000\n" ++
-        "node id=1 proposed=280.0000 preferred=0.0000,0.0000 avail=280.0000,90.0000 rect=10.0000,5.0000,280.0000,90.0000\n";
+        "node id=0 proposed=300.0000 preferred=0.0000,0.0000 avail=300.0000,100.0000 rect=0.0000,0.0000,300.0000,100.0000 measure=unmeasured\n" ++
+        "node id=1 proposed=280.0000 preferred=0.0000,0.0000 avail=280.0000,90.0000 rect=10.0000,5.0000,280.0000,90.0000 measure=unmeasured\n";
     try std.testing.expectEqualStrings(expected, trace);
 }
 
@@ -505,8 +507,8 @@ test "layout trace pretty renders indented avail/rect with the column projection
     defer std.testing.allocator.free(pretty);
 
     const expected =
-        "#0 proposed=400.0000 preferred=(0.0000, 0.0000) avail=(400.0000, 200.0000) rect=(0.0000, 0.0000, 200.0000, 400.0000)\n" ++
-        "  #1 proposed=380.0000 preferred=(0.0000, 0.0000) avail=(380.0000, 184.0000) rect=(10.0000, 12.0000, 184.0000, 180.0000)\n";
+        "#0 proposed=400.0000 preferred=(0.0000, 0.0000) avail=(400.0000, 200.0000) rect=(0.0000, 0.0000, 200.0000, 400.0000) measure=unmeasured\n" ++
+        "  #1 proposed=380.0000 preferred=(0.0000, 0.0000) avail=(380.0000, 184.0000) rect=(10.0000, 12.0000, 184.0000, 180.0000) measure=unmeasured\n";
     try std.testing.expectEqualStrings(expected, pretty);
 }
 
@@ -523,8 +525,8 @@ test "layout trace enumerates two roots by ascending id" {
     defer std.testing.allocator.free(trace);
 
     const expected =
-        "node id=0 proposed=200.0000 preferred=0.0000,0.0000 avail=200.0000,50.0000 rect=0.0000,0.0000,200.0000,50.0000\n" ++
-        "node id=1 proposed=100.0000 preferred=0.0000,0.0000 avail=100.0000,80.0000 rect=0.0000,0.0000,100.0000,80.0000\n";
+        "node id=0 proposed=200.0000 preferred=0.0000,0.0000 avail=200.0000,50.0000 rect=0.0000,0.0000,200.0000,50.0000 measure=unmeasured\n" ++
+        "node id=1 proposed=100.0000 preferred=0.0000,0.0000 avail=100.0000,80.0000 rect=0.0000,0.0000,100.0000,80.0000 measure=unmeasured\n";
     try std.testing.expectEqualStrings(expected, trace);
 }
 
