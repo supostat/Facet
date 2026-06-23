@@ -56,6 +56,15 @@ pub const LayoutResult = struct {
     h: f32 = 0,
 };
 
+/// An absolute window-coordinate point, the hit-test input (Phase 11). Tested
+/// directly against each node's LayoutResult, which IS the hit rect — there is no
+/// separate Rect type and no offset accumulation, since laid-out coords are
+/// already absolute.
+pub const Point = struct {
+    x: f32,
+    y: f32,
+};
+
 /// A shadow-tree node. The prop fields mirror the GPU Instance CORE fields as
 /// plain stored f32; no shadow/border/atlas fields (those join in a later
 /// phase). children stores child pointers in document order.
@@ -255,6 +264,7 @@ test {
     _ = @import("layout.zig");
     _ = @import("measure.zig");
     _ = @import("dirty.zig");
+    _ = @import("hit_test.zig");
 }
 
 test "createNode assigns sequential ids resolvable via lookup" {
