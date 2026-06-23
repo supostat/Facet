@@ -7,9 +7,12 @@ const Node = tree_module.Node;
 /// and byte-deterministic across runs (e.g. `360.0000`, `0.9200`, `0.0000`).
 const FLOAT_FORMAT = "{d:.4}";
 
-/// The two debug consumers of the shadow tree. Both share the single collection
+/// The three debug consumers of the shadow tree. All share the single collection
 /// layer (root enumeration + pre-order walk); only the per-node line differs.
-const Report = enum { shadow_tree, layout_trace };
+/// overlay is the Phase-13 render-overlay report: per node, its element bounds, its
+/// dirty flags, and its hit rect — all read from node.layout / the flags (Ф1: the
+/// hit rect IS node.layout, so the overlay names it once and never recomputes it).
+const Report = enum { shadow_tree, layout_trace, overlay };
 
 /// Dumps the shadow tree to writer. The machine form (pretty == false) is a
 /// single deterministic line per node in a fixed field order, refs by id, no
@@ -31,6 +34,16 @@ pub fn dumpLayoutTrace(tree: *Tree, writer: *std.Io.Writer, pretty: bool) std.Io
     try collect(tree, writer, .layout_trace, pretty);
 }
 
+/// Dumps the render overlays (Ф13): per node, the element bounds, the dirty flags,
+/// and the hit rect. The element bounds and the hit rect are BOTH node.layout (Ф1:
+/// the hit rect IS the laid-out rect), surfaced here under the overlay names a
+/// renderer would draw — element outline, dirty highlight, hit region. Reuses the
+/// same collect/walk as the tree and layout dumps (the single-collection-layer
+/// rule); machine mode (pretty == false) is byte-deterministic.
+pub fn dumpOverlays(tree: *Tree, writer: *std.Io.Writer, pretty: bool) std.Io.Writer.Error!void {
+    try collect(tree, writer, .overlay, pretty);
+}
+
 fn collect(tree: *Tree, writer: *std.Io.Writer, report: Report, pretty: bool) std.Io.Writer.Error!void {
     var id: u32 = 0;
     while (id < tree.next_id) : (id += 1) {
@@ -43,6 +56,7 @@ fn walk(node: *Node, writer: *std.Io.Writer, report: Report, pretty: bool, depth
     switch (report) {
         .shadow_tree => if (pretty) try writePretty(node, writer, depth) else try writeMachine(node, writer),
         .layout_trace => if (pretty) try writeTracePretty(node, writer, depth) else try writeTraceMachine(node, writer),
+        .overlay => if (pretty) try writeOverlayPretty(node, writer, depth) else try writeOverlayMachine(node, writer),
     }
     for (node.children.items) |child| try walk(child, writer, report, pretty, depth + 1);
 }
@@ -121,6 +135,51 @@ fn writeTracePretty(node: *Node, writer: *std.Io.Writer, depth: usize) std.Io.Wr
     try writer.print(" rect=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")\n", .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
 }
 
+/// The overlay machine line: element bounds, dirty flags, and the hit rect, all
+/// per node, byte-deterministic. element= and hit= are BOTH node.layout (Ф1 — the
+/// hit rect IS the laid-out rect) under the two overlay names a renderer would draw.
+fn writeOverlayMachine(node: *Node, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    try writer.print("node id={d}", .{node.id});
+    try writer.print(" element=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT, .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
+    try writer.print(" dirty=layout={},paint={}", .{ node.layout_dirty, node.paint_dirty });
+    try writer.print(" hit=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "\n", .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
+}
+
+fn writeOverlayPretty(node: *Node, writer: *std.Io.Writer, depth: usize) std.Io.Writer.Error!void {
+    var indent: usize = 0;
+    while (indent < depth) : (indent += 1) try writer.writeAll("  ");
+    try writer.print("#{d}", .{node.id});
+    try writer.print(" element=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")", .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
+    try writer.print(" dirty=(layout={}, paint={})", .{ node.layout_dirty, node.paint_dirty });
+    try writer.print(" hit=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")\n", .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
+}
+
+/// Per-frame counters the render overlay and the debug agent read (Ф13). The
+/// counters are byte-deterministic for a given frame; the timings are not (they
+/// vary per run), so the MACHINE dump omits them — only the pretty form surfaces
+/// them (deviation d: a non-deterministic field would break the byte-identical
+/// machine-dump contract test). A static frame recomputes nothing, so
+/// recomputed_node_count == 0 is the incrementality invariant.
+pub const FrameStats = struct {
+    instance_count: u32,
+    draw_call_count: u32,
+    recomputed_node_count: u32,
+    layout_micros: u64 = 0,
+    produce_micros: u64 = 0,
+};
+
+/// Dumps the frame stats. The machine form (pretty == false) emits ONLY the
+/// deterministic counters (no timings) as a single line so a before/after diff is
+/// byte-stable; the pretty form adds the per-run timings for a human. Both read the
+/// SAME FrameStats (single collection, dual output).
+pub fn dumpFrameStats(stats: FrameStats, writer: *std.Io.Writer, pretty: bool) std.Io.Writer.Error!void {
+    try writer.print("frame instances={d} draws={d} recomputed={d}", .{ stats.instance_count, stats.draw_call_count, stats.recomputed_node_count });
+    if (pretty) {
+        try writer.print(" layout_us={d} produce_us={d}", .{ stats.layout_micros, stats.produce_micros });
+    }
+    try writer.writeByte('\n');
+}
+
 /// Test-only: collects the dump into an owned slice via the testing allocator (caller frees).
 fn dumpToString(tree: *Tree, pretty: bool) ![]const u8 {
     var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
@@ -134,6 +193,22 @@ fn traceToString(tree: *Tree, pretty: bool) ![]const u8 {
     var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
     errdefer sink.deinit();
     try dumpLayoutTrace(tree, &sink.writer, pretty);
+    return sink.toOwnedSlice();
+}
+
+/// Test-only: collects the overlay dump into an owned slice (caller frees).
+fn overlaysToString(tree: *Tree, pretty: bool) ![]const u8 {
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    errdefer sink.deinit();
+    try dumpOverlays(tree, &sink.writer, pretty);
+    return sink.toOwnedSlice();
+}
+
+/// Test-only: collects the frame-stats dump into an owned slice (caller frees).
+fn frameStatsToString(stats: FrameStats, pretty: bool) ![]const u8 {
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    errdefer sink.deinit();
+    try dumpFrameStats(stats, &sink.writer, pretty);
     return sink.toOwnedSlice();
 }
 
@@ -476,4 +551,78 @@ test "layout trace shows the measured proposed extent and a non-zero preferred o
     try std.testing.expect(std.mem.indexOf(u8, trace, "node id=0 proposed=120.0000 preferred=120.0000,40.0000") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "node id=1 proposed=120.0000 preferred=120.0000,40.0000") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "preferred=0.0000,0.0000") == null);
+}
+
+test "overlay machine dump emits element bounds, dirty flags, and the hit rect per node, byte-deterministically" {
+    var tree = Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const root = try tree.createNode(.view);
+    root.layout = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
+    const child = try tree.createNode(.view);
+    child.layout = .{ .x = 10, .y = 20, .w = 80, .h = 40 };
+    child.paint_dirty = true;
+    try tree.appendChild(root, child);
+
+    const first = try overlaysToString(&tree, false);
+    defer std.testing.allocator.free(first);
+    const second = try overlaysToString(&tree, false);
+    defer std.testing.allocator.free(second);
+    try std.testing.expectEqualStrings(first, second);
+
+    const expected =
+        "node id=0 element=0.0000,0.0000,200.0000,100.0000 dirty=layout=false,paint=false hit=0.0000,0.0000,200.0000,100.0000\n" ++
+        "node id=1 element=10.0000,20.0000,80.0000,40.0000 dirty=layout=false,paint=true hit=10.0000,20.0000,80.0000,40.0000\n";
+    try std.testing.expectEqualStrings(expected, first);
+}
+
+test "overlay pretty dump indents and surfaces the same element/hit values" {
+    var tree = Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const root = try tree.createNode(.view);
+    root.layout = .{ .x = 0, .y = 0, .w = 200, .h = 100 };
+    const child = try tree.createNode(.view);
+    child.layout = .{ .x = 10, .y = 20, .w = 80, .h = 40 };
+    try tree.appendChild(root, child);
+
+    const pretty = try overlaysToString(&tree, true);
+    defer std.testing.allocator.free(pretty);
+
+    try std.testing.expect(std.mem.indexOf(u8, pretty, "#0 element=(0.0000, 0.0000, 200.0000, 100.0000)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pretty, "  #1 element=(10.0000, 20.0000, 80.0000, 40.0000)") != null);
+    try std.testing.expect(std.mem.indexOf(u8, pretty, "hit=(10.0000, 20.0000, 80.0000, 40.0000)") != null);
+}
+
+test "frame-stats machine dump omits the per-run timings and stays byte-identical across runs" {
+    const stats = FrameStats{
+        .instance_count = 3,
+        .draw_call_count = 1,
+        .recomputed_node_count = 0,
+        .layout_micros = 42,
+        .produce_micros = 17,
+    };
+
+    const machine = try frameStatsToString(stats, false);
+    defer std.testing.allocator.free(machine);
+
+    // The deterministic counters are present; the non-deterministic timings are not.
+    try std.testing.expectEqualStrings("frame instances=3 draws=1 recomputed=0\n", machine);
+    try std.testing.expect(std.mem.indexOf(u8, machine, "layout_us") == null);
+    try std.testing.expect(std.mem.indexOf(u8, machine, "produce_us") == null);
+}
+
+test "frame-stats pretty dump adds the timings to the same counters" {
+    const stats = FrameStats{
+        .instance_count = 3,
+        .draw_call_count = 1,
+        .recomputed_node_count = 2,
+        .layout_micros = 42,
+        .produce_micros = 17,
+    };
+
+    const pretty = try frameStatsToString(stats, true);
+    defer std.testing.allocator.free(pretty);
+
+    try std.testing.expectEqualStrings("frame instances=3 draws=1 recomputed=2 layout_us=42 produce_us=17\n", pretty);
 }

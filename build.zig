@@ -27,6 +27,7 @@ const app_sources = [_][]const u8{
     "src/platform/TextLayout.swift",
     "src/platform/Shaper.swift",
     "src/platform/Renderer.swift",
+    "src/platform/Bridge.swift",
     "src/platform/FrameLoop.swift",
     "src/platform/Window.swift",
     "src/platform/AppMain.swift",
@@ -89,7 +90,6 @@ const bench_sources = [_][]const u8{
     "src/platform/Shaper.swift",
     "src/platform/Renderer.swift",
     "src/platform/FrameLoop.swift",
-    "src/platform/Window.swift",
     "tests/snapshots/PngImage.swift",
     "tests/snapshots/ReferenceAtlas.swift",
     "tests/snapshots/ReferenceText.swift",
@@ -97,6 +97,47 @@ const bench_sources = [_][]const u8{
     // Not named main.swift: swiftc treats a literal main.swift as top-level
     // code, which conflicts with the @main attribute on RendererBench.
     "harness/renderer-bench/RendererBench.swift",
+};
+
+// The КТ-2 Zig-tree harness: the production seam stack (Renderer, Bridge,
+// FrameLoop) plus the harness window and the shared ReferenceZigTree + PngImage,
+// driven through the Zig static core lib. It links the lib + header (a seam
+// consumer); the production Window is NOT included (the harness owns its own
+// seam-driven window, like the bench).
+const zig_tree_sources = [_][]const u8{
+    "src/platform/Instance.swift",
+    "src/platform/MetallibLocator.swift",
+    "src/platform/ShelfPacker.swift",
+    "src/platform/GlyphRasterizer.swift",
+    "src/platform/Atlas.swift",
+    "src/platform/AtlasInspector.swift",
+    "src/platform/TextLayout.swift",
+    "src/platform/Renderer.swift",
+    "src/platform/Bridge.swift",
+    "src/platform/FrameLoop.swift",
+    "tests/snapshots/PngImage.swift",
+    "tests/snapshots/ReferenceZigTree.swift",
+    "harness/zig-tree/ZigTreeHarness.swift",
+};
+
+// The lower-seam end-to-end test: the seam stack plus the shared comparator,
+// PngImage, ReferenceZigTree scene, and the e2e @main. It constructs a Renderer
+// whose draw samples the atlas, so it loads the metallib; it links the Zig static
+// core lib + header (a seam consumer) and pins the phase-13 goldens.
+const lower_seam_test_sources = [_][]const u8{
+    "src/platform/Instance.swift",
+    "src/platform/MetallibLocator.swift",
+    "src/platform/ShelfPacker.swift",
+    "src/platform/GlyphRasterizer.swift",
+    "src/platform/Atlas.swift",
+    "src/platform/AtlasInspector.swift",
+    "src/platform/TextLayout.swift",
+    "src/platform/Renderer.swift",
+    "src/platform/Bridge.swift",
+    "tests/snapshots/PngImage.swift",
+    "tests/snapshots/SnapshotComparator.swift",
+    "tests/snapshots/ReferenceZigTree.swift",
+    "tests/e2e/LowerSeamEndToEndTests.swift",
 };
 
 // CoreText is required by GlyphRasterizer (the only Core Text imaging site);
@@ -178,54 +219,70 @@ const shaper_test_sources = [_][]const u8{
 
 pub fn build(b: *std.Build) void {
     const metallib = compileMetallib(b);
+    // The Zig static core lib (ReleaseSafe, arm64-apple-macosx26.0) linked into the
+    // three seam consumers: the app, the КТ-2 harness, and the e2e test. The seven
+    // pure-Swift snapshot tests pass null for core_lib and stay byte-identical.
+    const core_lib = compileCoreLib(b);
 
-    const app_binary = compileSwift(b, "facet", &app_sources, .release);
+    const app_binary = compileSwift(b, "facet", &app_sources, .release, core_lib);
     b.getInstallStep().dependOn(&b.addInstallBinFile(app_binary, "facet").step);
     b.getInstallStep().dependOn(&b.addInstallBinFile(metallib, "sdf.metallib").step);
 
     addRunStep(b, "run", "Build and run the windowed app (Metal validation OFF)", app_binary, metallib, false);
 
-    const debug_app_binary = compileSwift(b, "facet-debug", &app_sources, .debug);
+    const debug_app_binary = compileSwift(b, "facet-debug", &app_sources, .debug, core_lib);
     addRunStep(b, "run-debug", "Build and run the app with Metal API Validation ON", debug_app_binary, metallib, true);
 
-    const bench_binary = compileSwift(b, "facet-bench", &bench_sources, .release);
+    const bench_binary = compileSwift(b, "facet-bench", &bench_sources, .release, null);
     addRunStep(b, "bench", "Live eye-check window, --atlas for the live glyph atlas viewer, or --write-reference to regenerate goldens", bench_binary, metallib, false);
 
-    const clear_test_binary = compileSwift(b, "clear-frame-test", &clear_test_sources, .debug);
+    // КТ-2: the Zig-tree harness. Live window (default) or --write-reference to
+    // regenerate the phase-13 goldens. A seam consumer, so it links the core lib.
+    const zig_tree_binary = compileSwift(b, "facet-zig-tree", &zig_tree_sources, .release, core_lib);
+    addRunStep(b, "zig-tree", "КТ-2: live Zig-tree window (press M to mutate), or --write-reference to regenerate the phase-13 goldens", zig_tree_binary, metallib, false);
+
+    const clear_test_binary = compileSwift(b, "clear-frame-test", &clear_test_sources, .debug, null);
     const clear_test_run = runBinary(b, clear_test_binary, metallib, true);
     clear_test_run.expectExitCode(0);
 
-    const sdf_test_binary = compileSwift(b, "renderer-snapshot-test", &sdf_test_sources, .debug);
+    const sdf_test_binary = compileSwift(b, "renderer-snapshot-test", &sdf_test_sources, .debug, null);
     const sdf_test_run = runBinary(b, sdf_test_binary, metallib, true);
     sdf_test_run.expectExitCode(0);
 
-    const phase3_test_binary = compileSwift(b, "phase3-shadow-border-test", &phase3_test_sources, .debug);
+    const phase3_test_binary = compileSwift(b, "phase3-shadow-border-test", &phase3_test_sources, .debug, null);
     const phase3_test_run = runBinary(b, phase3_test_binary, metallib, true);
     phase3_test_run.expectExitCode(0);
 
     // The atlas logic test takes no metallib: it constructs no Renderer and does
     // not sample a glyph shader, only the atlas texture upload/readback path.
-    const atlas_test_binary = compileSwift(b, "atlas-test", &atlas_test_sources, .debug);
+    const atlas_test_binary = compileSwift(b, "atlas-test", &atlas_test_sources, .debug, null);
     const atlas_test_run = runBinaryWithoutMetallib(b, atlas_test_binary, true);
     atlas_test_run.expectExitCode(0);
 
     // The atlas golden + metric test also constructs no Renderer (Renderer is
     // compiled only for the CapturedFrame type), so it loads no metallib.
-    const atlas_snapshot_test_binary = compileSwift(b, "atlas-snapshot-test", &atlas_snapshot_test_sources, .debug);
+    const atlas_snapshot_test_binary = compileSwift(b, "atlas-snapshot-test", &atlas_snapshot_test_sources, .debug, null);
     const atlas_snapshot_test_run = runBinaryWithoutMetallib(b, atlas_snapshot_test_binary, true);
     atlas_snapshot_test_run.expectExitCode(0);
 
     // The text test constructs a Renderer and the glyph fragment branch samples
     // the atlas texture, so it loads the metallib (unlike the atlas tests).
-    const text_test_binary = compileSwift(b, "text-snapshot-test", &text_test_sources, .debug);
+    const text_test_binary = compileSwift(b, "text-snapshot-test", &text_test_sources, .debug, null);
     const text_test_run = runBinary(b, text_test_binary, metallib, true);
     text_test_run.expectExitCode(0);
 
     // The shaper test constructs a Renderer and the glyph fragment branch samples
     // the atlas texture, so it loads the metallib (like the text test).
-    const shaper_test_binary = compileSwift(b, "shaper-snapshot-test", &shaper_test_sources, .debug);
+    const shaper_test_binary = compileSwift(b, "shaper-snapshot-test", &shaper_test_sources, .debug, null);
     const shaper_test_run = runBinary(b, shaper_test_binary, metallib, true);
     shaper_test_run.expectExitCode(0);
+
+    // The lower-seam end-to-end test: the Zig core writes instances into the shared
+    // MTLBuffer and the frame renders. A seam consumer (links the core lib + header)
+    // that constructs a Renderer and samples the atlas, so it loads the metallib.
+    const lower_seam_test_binary = compileSwift(b, "lower-seam-e2e-test", &lower_seam_test_sources, .debug, core_lib);
+    const lower_seam_test_run = runBinary(b, lower_seam_test_binary, metallib, true);
+    lower_seam_test_run.expectExitCode(0);
 
     // The Block-II shadow-tree engine core: a NATIVE zig test artifact (no swiftc,
     // no metallib). tree.zig pulls debug.zig, layout.zig, measure.zig, dirty.zig,
@@ -235,6 +292,15 @@ pub fn build(b: *std.Build) void {
     const core_test = b.addTest(.{ .name = "core-test", .root_module = core_module });
     const core_test_run = b.addRunArtifact(core_test);
 
+    // The C-ABI seam is the outermost core module (the only one importing
+    // layout/dirty/hit_test/instances together and carrying callconv(.c) exports),
+    // so tree.zig does NOT import it — it gets its OWN native test artifact. A
+    // drifted @offsetOf fails the comptime layout assertion here, before any Swift
+    // link, isolating a Zig-side break from the build.zig wiring.
+    const seam_test_module = b.createModule(.{ .root_source_file = b.path("src/core/instance_seam.zig"), .target = b.graph.host, .optimize = .Debug });
+    const seam_test = b.addTest(.{ .name = "instance-seam-test", .root_module = seam_test_module });
+    const seam_test_run = b.addRunArtifact(seam_test);
+
     const test_step = b.step("test", "Run the Swift snapshot tests and the native Zig engine-core tests (tree, layout, measure, debug, dirty, hit_test, instances; Metal validation ON)");
     test_step.dependOn(&clear_test_run.step);
     test_step.dependOn(&sdf_test_run.step);
@@ -243,7 +309,9 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&atlas_snapshot_test_run.step);
     test_step.dependOn(&text_test_run.step);
     test_step.dependOn(&shaper_test_run.step);
+    test_step.dependOn(&lower_seam_test_run.step);
     test_step.dependOn(&core_test_run.step);
+    test_step.dependOn(&seam_test_run.step);
 }
 
 const Optimization = enum { debug, release };
@@ -253,6 +321,7 @@ fn compileSwift(
     binary_basename: []const u8,
     sources: []const []const u8,
     optimization: Optimization,
+    core_lib: ?std.Build.LazyPath,
 ) std.Build.LazyPath {
     const compile = b.addSystemCommand(&.{ "swiftc", "-target", swift_target });
     switch (optimization) {
@@ -261,8 +330,44 @@ fn compileSwift(
     }
     for (sources) |source| compile.addFileArg(b.path(source));
     for (linked_frameworks) |framework| compile.addArgs(&.{ "-framework", framework });
+    // A seam consumer (the app, the КТ-2 harness, the e2e test) links the Zig
+    // static core lib and imports the C bridging header so the callconv(.c) seam
+    // symbols and the FacetInstance struct are visible. The seven pure-Swift
+    // snapshot tests pass null here, so they get NEITHER the header nor the lib and
+    // stay byte-identical (deviation e).
+    if (core_lib) |lib| {
+        compile.addArg("-import-objc-header");
+        compile.addFileArg(b.path("src/platform/Facet-Bridging-Header.h"));
+        compile.addFileArg(lib);
+    }
     compile.addArg("-o");
     return compile.addOutputFileArg(binary_basename);
+}
+
+// Produces the Zig static core library (libfacetcore.a) from the outermost seam
+// module. Pinned to .ReleaseSafe so the contract-violation `unreachable`s
+// (tree.childIndex, instances.ownerId) stay CHECKED panics rather than UB (closes
+// the 2026-06-19 ReleaseFast/Small debt). The lib target is resolved to
+// arm64-apple-macosx26.0 — the SAME deployment minimum as swift_target — so the
+// linker emits no version-skew warning; b.graph.host is NOT used (it resolves to
+// the running macos.26.1, which would mismatch).
+fn compileCoreLib(b: *std.Build) std.Build.LazyPath {
+    const lib_target = b.resolveTargetQuery(.{
+        .cpu_arch = .aarch64,
+        .os_tag = .macos,
+        .os_version_min = .{ .semver = .{ .major = 26, .minor = 0, .patch = 0 } },
+    });
+    const lib_module = b.createModule(.{
+        .root_source_file = b.path("src/core/instance_seam.zig"),
+        .target = lib_target,
+        .optimize = .ReleaseSafe,
+    });
+    const lib = b.addLibrary(.{
+        .name = "facetcore",
+        .root_module = lib_module,
+        .linkage = .static,
+    });
+    return lib.getEmittedBin();
 }
 
 // Compiles the Metal shaders to a single .metallib in two stages, mirroring

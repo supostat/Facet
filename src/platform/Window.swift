@@ -9,18 +9,18 @@ import Metal
 final class Window: NSObject, NSWindowDelegate {
     private static let defaultContentSize = NSSize(width: 1024, height: 640)
 
-    // Hardcoded reference scene supplied to the renderer every frame (§0a: the
-    // renderer never builds a scene; this external supplier does). Removed when a
-    // real scene source arrives in a later phase.
-    private static let referenceScene = Instance.referenceScene
-
     private let window: NSWindow
     private let metalLayer: CAMetalLayer
     private let renderer: Renderer
+    private let bridge: Bridge
     private let frameLoop: FrameLoop
 
     init(metallibPath: String) {
         renderer = Renderer(metallibPath: metallibPath)
+        // The Zig seam builds the initial tree and writes instances straight into
+        // the renderer's shared buffer; Window no longer carries a hardcoded scene
+        // (the Block III stitching removes it — the tree is the scene source now).
+        bridge = Bridge(renderer: renderer)
 
         metalLayer = CAMetalLayer()
         metalLayer.device = MTLCreateSystemDefaultDevice()
@@ -41,10 +41,26 @@ final class Window: NSObject, NSWindowDelegate {
         window.contentView = contentView
         window.center()
 
-        frameLoop = FrameLoop { [renderer, metalLayer] in
+        // The seam-driven frame: on a changed frame, ask Zig to produce the instance
+        // array straight into the shared buffer and draw the produced count; on a
+        // static frame, re-bind the SAME buffer and re-draw the prior count with NO
+        // produce. The static redraw relies on the .storageModeShared buffer
+        // persisting and never reallocating outside a produce that re-hands the base
+        // — a no-produce frame must re-bind exactly the base the last produce wrote.
+        frameLoop = FrameLoop { [renderer, metalLayer, bridge] in
             guard let drawable = metalLayer.nextDrawable() else { return }
+            let drawableSize = metalLayer.drawableSize
+            let count: Int
+            if bridge.hasChanged() {
+                count = bridge.produceInstances(
+                    drawableWidth: Float(drawableSize.width),
+                    drawableHeight: Float(drawableSize.height)
+                )
+            } else {
+                count = bridge.lastInstanceCount
+            }
             renderer.drawSdfFrame(
-                Self.referenceScene,
+                instanceCount: count,
                 presentingTo: drawable,
                 targetTexture: drawable.texture
             )

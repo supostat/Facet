@@ -70,6 +70,25 @@ pub const SlotRange = struct {
     count: u32,
 };
 
+/// A caller-owned span the producer writes instances into directly — the lower
+/// seam's zero-copy target (Р13): base points at GPU-visible MTLBuffer memory,
+/// capacity is how many Instances fit. The producer never writes past capacity;
+/// when the tree needs more it reports the required count so the caller can grow
+/// and re-hand a new base (the base is storage, not identity — the id→SlotRange
+/// map is storage-independent and survives the move).
+pub const ExternalTarget = struct {
+    base: [*]Instance,
+    capacity: u32,
+};
+
+/// The result of buildInto: written holds the instance count emitted into the
+/// target (≤ capacity), overflow holds the required count when the tree did not
+/// fit — in the overflow case NOTHING was written to the target.
+pub const BuildOutcome = union(enum) {
+    written: u32,
+    overflow: u32,
+};
+
 /// Builds and owns the flat []Instance the renderer uploads, plus a stable
 /// id→SlotRange side map. The buffer and map live on a STORED backing allocator,
 /// NOT the Tree arena: the arena never reclaims per-allocation, so a per-frame
@@ -158,7 +177,92 @@ pub const InstanceProducer = struct {
     pub fn slice(self: *const InstanceProducer) []const Instance {
         return self.instances.items;
     }
+
+    /// Full rebuild straight into a caller-owned target (the lower seam's zero-copy
+    /// path — the target IS GPU-visible MTLBuffer memory). A SINGLE shared walk
+    /// measures the required count over the SAME visible()/placedGlyphs() predicates
+    /// the write uses (no divergent second predicate): if required > capacity it
+    /// returns .overflow{required} WITHOUT writing a single byte to the target (so a
+    /// partially-grown buffer never carries a torn frame), otherwise it writes ≤
+    /// capacity instances and rebuilds the id→SlotRange map identically to build().
+    /// The slots map is storage-independent, so it survives the base pointer moving
+    /// between calls. The slots map must already be reserved for the tree's node
+    /// count (no allocation happens mid-write), which the seam guarantees by
+    /// reserving at build-reference / mutate time.
+    pub fn buildInto(self: *InstanceProducer, root: *Node, target: ExternalTarget) std.mem.Allocator.Error!BuildOutcome {
+        const required = requiredInstanceCount(root);
+        if (required > target.capacity) return .{ .overflow = required };
+
+        self.slots.clearRetainingCapacity();
+        var cursor: u32 = 0;
+        try self.emitInto(root, target, &cursor);
+        return .{ .written = cursor };
+    }
+
+    /// Pre-order write into the external target mirroring emit(): emit this node's
+    /// own instances at cursor (recording its slot), advance the cursor, then
+    /// recurse. An invisible node writes nothing and records no slot but is still
+    /// descended into. The caller pre-checked capacity via requiredInstanceCount,
+    /// so every write here is in bounds.
+    fn emitInto(self: *InstanceProducer, node: *Node, target: ExternalTarget, cursor: *u32) std.mem.Allocator.Error!void {
+        if (visible(node)) {
+            const start = cursor.*;
+            switch (node.kind) {
+                .view => {
+                    target.base[cursor.*] = sdfInstance(node);
+                    cursor.* += 1;
+                },
+                .text => for (placedGlyphs(node)) |glyph| {
+                    target.base[cursor.*] = glyphInstance(node, glyph);
+                    cursor.* += 1;
+                },
+            }
+            try self.slots.put(node.id, .{ .start = start, .count = cursor.* - start });
+        }
+        for (node.children.items) |child| try self.emitInto(child, target, cursor);
+    }
+
+    /// Rewrites the node's already-sized span in place in a caller-owned target for
+    /// a paint-only change (the buildInto sibling of pointUpdate), then clears
+    /// paint_dirty. The node MUST have been emitted into this same target geometry
+    /// (its slot exists, glyph count unchanged). A node with no slot (zero-size at
+    /// the last buildInto) clears its flag and returns — a no-op repaint.
+    pub fn pointUpdateInto(self: *InstanceProducer, node: *Node, target: ExternalTarget) void {
+        const range = self.slots.get(node.id) orelse {
+            node.paint_dirty = false;
+            return;
+        };
+        switch (node.kind) {
+            .view => target.base[range.start] = sdfInstance(node),
+            .text => {
+                const glyphs = placedGlyphs(node);
+                std.debug.assert(glyphs.len == range.count);
+                for (glyphs, 0..) |glyph, offset| {
+                    target.base[range.start + offset] = glyphInstance(node, glyph);
+                }
+            },
+        }
+        node.paint_dirty = false;
+    }
 };
+
+/// The instance count the tree emits, measured over the SAME visible()/
+/// placedGlyphs() predicates the write pass uses — the measure half of buildInto's
+/// single shared walk, so the count can never disagree with the write. A visible
+/// .view contributes one; a visible .text one per placed glyph; an invisible node
+/// contributes nothing but its children are still counted. u32-bounded so the
+/// overflow return encoding stays collision-free.
+fn requiredInstanceCount(node: *const Node) u32 {
+    var total: u32 = 0;
+    if (visible(node)) {
+        total += switch (node.kind) {
+            .view => 1,
+            .text => @intCast(placedGlyphs(node).len),
+        };
+    }
+    for (node.children.items) |child| total += requiredInstanceCount(child);
+    return total;
+}
 
 /// Whether a node contributes instances: a degenerate (zero-area) rect draws
 /// nothing, so it is skipped (mirrors hit_test.zig's w==0/h==0 guard). Per-node
@@ -442,6 +546,42 @@ test "a paint-dirty view rewrites exactly its slot, leaves every other byte iden
     try testing.expect(!sibling.paint_dirty);
 }
 
+test "pointUpdateInto rewrites exactly the dirty node's slot in an external target and leaves every other byte identical" {
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    var producer = InstanceProducer.init(testing.allocator);
+    defer producer.deinit();
+
+    const root = try viewNode(&t, .{ .x = 0, .y = 0, .w = 100, .h = 50 }, .{ 1, 0, 0, 1 });
+    const sibling = try viewNode(&t, .{ .x = 0, .y = 50, .w = 100, .h = 50 }, .{ 0, 1, 0, 1 });
+    try t.appendChild(root, sibling);
+
+    var external: [8]Instance = undefined;
+    const target = ExternalTarget{ .base = &external, .capacity = external.len };
+    const outcome = try producer.buildInto(root, target);
+    const written = switch (outcome) {
+        .written => |count| count,
+        .overflow => return error.UnexpectedOverflow,
+    };
+
+    const before = try testing.allocator.dupe(Instance, external[0..written]);
+    defer testing.allocator.free(before);
+
+    sibling.color_b = 0.5;
+    sibling.paint_dirty = true;
+    producer.pointUpdateInto(sibling, target);
+
+    const sibling_slot = producer.slots.get(sibling.id).?.start;
+    try testing.expect(!std.mem.eql(u8, std.mem.asBytes(&before[sibling_slot]), std.mem.asBytes(&external[sibling_slot])));
+    try testing.expectEqual(@as(f32, 0.5), external[sibling_slot].colorB);
+    // Every OTHER slot in the external target is byte-for-byte unchanged.
+    for (before, 0..) |old, index| {
+        if (index == sibling_slot) continue;
+        try testing.expect(std.mem.eql(u8, std.mem.asBytes(&old), std.mem.asBytes(&external[index])));
+    }
+    try testing.expect(!sibling.paint_dirty);
+}
+
 test "the node-to-slot map is stable across two full rebuilds of the same tree" {
     var t = Tree.init(testing.allocator);
     defer t.deinit();
@@ -581,6 +721,132 @@ test "a paint-dirty text node re-tints all its glyph slots and leaves every othe
         try testing.expect(std.mem.eql(u8, std.mem.asBytes(&old), std.mem.asBytes(&new)));
     }
     try testing.expect(!label.paint_dirty);
+}
+
+test "buildInto an external slice writes the same bytes and the same slots as build into the ArrayList" {
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    var producer = InstanceProducer.init(testing.allocator);
+    defer producer.deinit();
+
+    const root = try viewNode(&t, .{ .x = 0, .y = 0, .w = 200, .h = 100 }, .{ 0.5, 0.5, 0.5, 1 });
+    const a = try viewNode(&t, .{ .x = 0, .y = 0, .w = 40, .h = 40 }, .{ 1, 0, 0, 1 });
+    const b = try textNode(&t, .{ .x = 40, .y = 0, .w = 30, .h = 18 }, .{ 0, 0, 0, 1 }, &.{
+        .{ .center_x = 45, .center_y = 9, .width = 8, .height = 12, .atlas_min_u = 0, .atlas_min_v = 0, .atlas_max_u = 0.1, .atlas_max_v = 0.1 },
+        .{ .center_x = 55, .center_y = 9, .width = 8, .height = 12, .atlas_min_u = 0.1, .atlas_min_v = 0, .atlas_max_u = 0.2, .atlas_max_v = 0.1 },
+    });
+    try t.appendChild(root, a);
+    try t.appendChild(root, b);
+
+    // The reference: a build into the producer's own ArrayList.
+    try producer.build(root);
+    const reference_bytes = try testing.allocator.dupe(Instance, producer.slice());
+    defer testing.allocator.free(reference_bytes);
+    const reference_root = producer.slots.get(root.id).?;
+    const reference_a = producer.slots.get(a.id).?;
+    const reference_b = producer.slots.get(b.id).?;
+
+    // buildInto an external, caller-owned slice large enough to hold the tree.
+    var external: [8]Instance = undefined;
+    const target = ExternalTarget{ .base = &external, .capacity = external.len };
+    const outcome = try producer.buildInto(root, target);
+
+    try testing.expectEqual(BuildOutcome{ .written = @intCast(reference_bytes.len) }, outcome);
+    try testing.expect(std.mem.eql(
+        u8,
+        std.mem.sliceAsBytes(reference_bytes),
+        std.mem.sliceAsBytes(external[0..reference_bytes.len]),
+    ));
+    // The slot side map is rebuilt identically regardless of the storage target.
+    try testing.expectEqual(reference_root, producer.slots.get(root.id).?);
+    try testing.expectEqual(reference_a, producer.slots.get(a.id).?);
+    try testing.expectEqual(reference_b, producer.slots.get(b.id).?);
+}
+
+test "buildInto reports a written count equal to the tree's emitted instance count" {
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    var producer = InstanceProducer.init(testing.allocator);
+    defer producer.deinit();
+
+    const root = try viewNode(&t, .{ .x = 0, .y = 0, .w = 300, .h = 80 }, .{ 0.9, 0.9, 0.9, 1 });
+    const label = try textNode(&t, .{ .x = 8, .y = 8, .w = 64, .h = 18 }, .{ 0, 0, 0, 1 }, &.{
+        .{ .center_x = 12, .center_y = 17, .width = 10, .height = 14, .atlas_min_u = 0.1, .atlas_min_v = 0.2, .atlas_max_u = 0.15, .atlas_max_v = 0.3 },
+        .{ .center_x = 24, .center_y = 17, .width = 10, .height = 14, .atlas_min_u = 0.2, .atlas_min_v = 0.2, .atlas_max_u = 0.25, .atlas_max_v = 0.3 },
+        .{ .center_x = 36, .center_y = 17, .width = 10, .height = 14, .atlas_min_u = 0.3, .atlas_min_v = 0.2, .atlas_max_u = 0.35, .atlas_max_v = 0.3 },
+    });
+    try t.appendChild(root, label);
+
+    var external: [16]Instance = undefined;
+    const outcome = try producer.buildInto(root, .{ .base = &external, .capacity = external.len });
+
+    // One SDF plus three glyphs: the shared walk's measure agrees with its write.
+    switch (outcome) {
+        .written => |count| try testing.expectEqual(@as(u32, 4), count),
+        .overflow => return error.UnexpectedOverflow,
+    }
+}
+
+test "buildInto two different external slices leaves the slot map byte-identical (survives a base-pointer move)" {
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    var producer = InstanceProducer.init(testing.allocator);
+    defer producer.deinit();
+
+    const root = try viewNode(&t, .{ .x = 0, .y = 0, .w = 200, .h = 100 }, .{ 0.5, 0.5, 0.5, 1 });
+    const a = try viewNode(&t, .{ .x = 0, .y = 0, .w = 40, .h = 40 }, .{ 1, 0, 0, 1 });
+    const b = try viewNode(&t, .{ .x = 40, .y = 0, .w = 40, .h = 40 }, .{ 0, 1, 0, 1 });
+    try t.appendChild(root, a);
+    try t.appendChild(root, b);
+
+    var first: [8]Instance = undefined;
+    _ = try producer.buildInto(root, .{ .base = &first, .capacity = first.len });
+    const first_root = producer.slots.get(root.id).?;
+    const first_a = producer.slots.get(a.id).?;
+    const first_b = producer.slots.get(b.id).?;
+
+    // A SECOND, distinct backing slice (the realloc-and-rehand case): the storage
+    // moved, but the id->SlotRange offsets are storage-independent.
+    var second: [8]Instance = undefined;
+    _ = try producer.buildInto(root, .{ .base = &second, .capacity = second.len });
+
+    try testing.expectEqual(first_root, producer.slots.get(root.id).?);
+    try testing.expectEqual(first_a, producer.slots.get(a.id).?);
+    try testing.expectEqual(first_b, producer.slots.get(b.id).?);
+    // The bytes themselves are identical across the two backings.
+    try testing.expect(std.mem.eql(
+        u8,
+        std.mem.sliceAsBytes(first[0..3]),
+        std.mem.sliceAsBytes(second[0..3]),
+    ));
+}
+
+test "buildInto an undersized slice returns overflow with the required count and writes nothing" {
+    var t = Tree.init(testing.allocator);
+    defer t.deinit();
+    var producer = InstanceProducer.init(testing.allocator);
+    defer producer.deinit();
+
+    const root = try viewNode(&t, .{ .x = 0, .y = 0, .w = 300, .h = 80 }, .{ 0.9, 0.9, 0.9, 1 });
+    const label = try textNode(&t, .{ .x = 8, .y = 8, .w = 64, .h = 18 }, .{ 0, 0, 0, 1 }, &.{
+        .{ .center_x = 12, .center_y = 17, .width = 10, .height = 14, .atlas_min_u = 0.1, .atlas_min_v = 0.2, .atlas_max_u = 0.15, .atlas_max_v = 0.3 },
+        .{ .center_x = 24, .center_y = 17, .width = 10, .height = 14, .atlas_min_u = 0.2, .atlas_min_v = 0.2, .atlas_max_u = 0.25, .atlas_max_v = 0.3 },
+        .{ .center_x = 36, .center_y = 17, .width = 10, .height = 14, .atlas_min_u = 0.3, .atlas_min_v = 0.2, .atlas_max_u = 0.35, .atlas_max_v = 0.3 },
+    });
+    try t.appendChild(root, label);
+
+    // The tree emits 4 instances; the slice holds only 3.
+    var external = [_]Instance{undefined} ** 3;
+    const sentinel = std.mem.zeroes(Instance);
+    @memset(&external, sentinel);
+
+    const outcome = try producer.buildInto(root, .{ .base = &external, .capacity = external.len });
+
+    try testing.expectEqual(BuildOutcome{ .overflow = 4 }, outcome);
+    // Nothing was written: every slot stays the zeroed sentinel.
+    for (external) |entry| {
+        try testing.expect(std.mem.eql(u8, std.mem.asBytes(&entry), std.mem.asBytes(&sentinel)));
+    }
 }
 
 test "the machine dump is byte-deterministic, the pretty form carries the same values, and the map is ascending-id" {

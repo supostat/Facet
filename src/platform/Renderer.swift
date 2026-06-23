@@ -50,7 +50,16 @@ final class Renderer {
     private(set) var committedFrameCount: Int = 0
     private(set) var drawCallCount: Int = 0
 
-    init(metallibPath: String) {
+    convenience init(metallibPath: String) {
+        self.init(metallibPath: metallibPath, initialInstanceCapacity: Self.minimumInstanceCapacity)
+    }
+
+    // The designated initializer takes an explicit starting instance capacity so a
+    // test can start the shared buffer below a tree's instance count and exercise
+    // the seam's overflow -> grow -> rehand path (mirrors Atlas(device:initialSize:)).
+    // Production callers use the convenience init with the minimum capacity.
+    init(metallibPath: String, initialInstanceCapacity: Int) {
+        precondition(initialInstanceCapacity > 0, "initial instance capacity must be positive, got \(initialInstanceCapacity)")
         guard let device = MTLCreateSystemDefaultDevice() else {
             fatalError("Metal is unavailable: MTLCreateSystemDefaultDevice returned nil")
         }
@@ -65,9 +74,9 @@ final class Renderer {
         self.atlas = Atlas(device: device)
         self.atlasSampler = Self.makeSampler(device: device)
 
-        self.instanceCapacity = Self.minimumInstanceCapacity
+        self.instanceCapacity = initialInstanceCapacity
         guard let buffer = device.makeBuffer(
-            length: Self.minimumInstanceCapacity * MemoryLayout<Instance>.stride,
+            length: initialInstanceCapacity * MemoryLayout<Instance>.stride,
             options: .storageModeShared
         ) else {
             fatalError("Failed to allocate the shared instance buffer")
@@ -138,9 +147,35 @@ final class Renderer {
         presentingTo drawable: CAMetalDrawable,
         targetTexture: MTLTexture
     ) {
+        if !instances.isEmpty {
+            uploadInstances(instances)
+        }
+        drawSdfFrame(
+            instanceCount: instances.count,
+            presentingTo: drawable,
+            targetTexture: targetTexture
+        )
+    }
+
+    func captureSdfFrame(_ instances: [Instance], width: Int, height: Int) -> CapturedFrame {
+        if !instances.isEmpty {
+            uploadInstances(instances)
+        }
+        return captureSdfFrame(instanceCount: instances.count, width: width, height: height)
+    }
+
+    // Count-based draw: the shared instance buffer is ALREADY populated (the Zig
+    // seam wrote it straight into GPU-visible memory), so this path skips
+    // uploadInstances entirely and just binds the buffer and draws instanceCount
+    // instances — the lower-seam zero-copy frame.
+    func drawSdfFrame(
+        instanceCount: Int,
+        presentingTo drawable: CAMetalDrawable,
+        targetTexture: MTLTexture
+    ) {
         let drawableSize = SIMD2<Float>(Float(targetTexture.width), Float(targetTexture.height))
         encodeSdf(
-            instances,
+            instanceCount: instanceCount,
             into: targetTexture,
             drawableSize: drawableSize,
             presenting: drawable,
@@ -148,11 +183,11 @@ final class Renderer {
         )
     }
 
-    func captureSdfFrame(_ instances: [Instance], width: Int, height: Int) -> CapturedFrame {
+    func captureSdfFrame(instanceCount: Int, width: Int, height: Int) -> CapturedFrame {
         let targetTexture = makeOffscreenTexture(width: width, height: height)
         let drawableSize = SIMD2<Float>(Float(width), Float(height))
         encodeSdf(
-            instances,
+            instanceCount: instanceCount,
             into: targetTexture,
             drawableSize: drawableSize,
             presenting: nil,
@@ -161,17 +196,33 @@ final class Renderer {
         return readBack(targetTexture)
     }
 
+    // The base address of the shared instance buffer — the pointer the Zig seam
+    // writes instances into and the SAME address setVertexBuffer binds, so Metal
+    // reads exactly the bytes Zig wrote with no copy (Р13 unified-memory zero-copy).
+    var sharedInstanceBufferBaseAddress: UnsafeMutableRawPointer {
+        instanceBuffer.contents()
+    }
+
+    // How many Instances the shared buffer currently holds. The seam re-checks this
+    // at give-instances time; an overflow there triggers growSharedInstanceBuffer.
+    var sharedInstanceCapacity: Int {
+        instanceCapacity
+    }
+
+    // Grows the shared instance buffer to hold at least requiredCount instances. The
+    // base address CHANGES, so the caller MUST re-hand the new base to the seam
+    // before the next produce (the Bridge rehand-and-retry path).
+    func growSharedInstanceBuffer(toFit requiredCount: Int) {
+        growInstanceBuffer(toFit: requiredCount)
+    }
+
     private func encodeSdf(
-        _ instances: [Instance],
+        instanceCount: Int,
         into targetTexture: MTLTexture,
         drawableSize: SIMD2<Float>,
         presenting drawable: CAMetalDrawable?,
         waitForCompletion: Bool
     ) {
-        if !instances.isEmpty {
-            uploadInstances(instances)
-        }
-
         let renderPass = MTLRenderPassDescriptor()
         renderPass.colorAttachments[0].texture = targetTexture
         renderPass.colorAttachments[0].loadAction = .clear
@@ -185,7 +236,7 @@ final class Renderer {
             fatalError("Failed to create a render command encoder")
         }
 
-        if !instances.isEmpty {
+        if instanceCount > 0 {
             var size = drawableSize
             encoder.setRenderPipelineState(sdfPipelineState)
             encoder.setVertexBuffer(instanceBuffer, offset: 0, index: 0)
@@ -200,7 +251,7 @@ final class Renderer {
                 type: .triangle,
                 vertexStart: 0,
                 vertexCount: 6,
-                instanceCount: instances.count
+                instanceCount: instanceCount
             )
             drawCallCount += 1
         }
