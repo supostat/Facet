@@ -29,6 +29,26 @@ pub const MeasureCallback = struct {
     measure: *const fn (*anyopaque, []const u8, f32) MeasuredSize,
 };
 
+/// A single shaped glyph placed by the Phase 6 line shaper, the platform seam
+/// that hands geometry into instance production (Ф9 platform-seam precedent: the
+/// function pointer / opaque-data shape keeps Core Text out of the Zig core).
+/// center_x/center_y is the cell CENTER in absolute drawable pixels — origin +
+/// bearing + half the pixel rect, all BAKED at Phase 6 so instance production
+/// consumes it verbatim and never reshapes or recomputes bearing. width/height
+/// is the full cell extent; atlas_min/max u/v is the glyph's normalized atlas
+/// sub-rectangle in [0, 1] texture coordinates. A mock fills this in tests; the
+/// real Core Text shaper wires it at Phase 14.
+pub const PlacedGlyph = struct {
+    center_x: f32,
+    center_y: f32,
+    width: f32,
+    height: f32,
+    atlas_min_u: f32,
+    atlas_min_v: f32,
+    atlas_max_u: f32,
+    atlas_max_v: f32,
+};
+
 /// The per-node result of the measure pass, in main/cross terms (Р11). Default
 /// zero on every node so debug's per-node `preferred=` read is always defined,
 /// including on flex and root nodes the measure pass leaves at zero.
@@ -84,6 +104,25 @@ pub const Node = struct {
     color_a: f32 = 0,
     corner_radius: f32 = 0,
 
+    // Shadow/border render props (Phase 12), mirroring the GPU Instance's
+    // shadow + border visual block as plain stored f32, default-zero so an
+    // unset node composites with no shadow and no border (the shader's inert
+    // defaults). Deliberately NOT in PropsUpdate/render_props: Phase 16 owns the
+    // host setters, and adding them here would break dirty.zig's render_props↔
+    // classify lock test and the expected_class exhaustiveness table.
+    shadow_offset_x: f32 = 0,
+    shadow_offset_y: f32 = 0,
+    shadow_blur_radius: f32 = 0,
+    shadow_color_r: f32 = 0,
+    shadow_color_g: f32 = 0,
+    shadow_color_b: f32 = 0,
+    shadow_color_a: f32 = 0,
+    border_thickness: f32 = 0,
+    border_color_r: f32 = 0,
+    border_color_g: f32 = 0,
+    border_color_b: f32 = 0,
+    border_color_a: f32 = 0,
+
     // Layout-input fields (Phase 8). The layout engine reads these and writes the
     // computed rect into `layout`. width/height above stay render-only props; the
     // LAYOUT source of truth is main_size/cross_size, where null means flexible.
@@ -105,6 +144,10 @@ pub const Node = struct {
     sizing_mode: SizingMode = .fixed,
     text: ?[]const u8 = null,
     measure_callback: ?MeasureCallback = null,
+    // The shaped, placed glyphs of a .text node (Phase 12), the seam instance
+    // production expands into one glyph Instance each. null on a fresh node and
+    // on every .view node; Phase 14 wires the real Core Text shaper.
+    placed_glyphs: ?[]const PlacedGlyph = null,
     preferred: PreferredSize = .{},
 
     layout: LayoutResult = .{},
@@ -265,6 +308,7 @@ test {
     _ = @import("measure.zig");
     _ = @import("dirty.zig");
     _ = @import("hit_test.zig");
+    _ = @import("instances.zig");
 }
 
 test "createNode assigns sequential ids resolvable via lookup" {
