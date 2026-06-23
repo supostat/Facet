@@ -5,6 +5,7 @@ const dirty = @import("dirty.zig");
 const hit_test = @import("hit_test.zig");
 const instances = @import("instances.zig");
 const measure_seam = @import("measure_seam.zig");
+const shape_seam = @import("shape_seam.zig");
 const Tree = tree.Tree;
 const Node = tree.Node;
 const Instance = instances.Instance;
@@ -12,6 +13,9 @@ const InstanceProducer = instances.InstanceProducer;
 const ExternalTarget = instances.ExternalTarget;
 const MeasureFn = measure_seam.MeasureFn;
 const MeasureContext = measure_seam.MeasureContext;
+const ShapeFn = shape_seam.ShapeFn;
+const ShapeContext = shape_seam.ShapeContext;
+const PlacedGlyph = tree.PlacedGlyph;
 
 // instance_seam.zig is the OUTERMOST core module: the only .zig that imports
 // layout/dirty/hit_test/instances/tree together, and the only one carrying
@@ -89,6 +93,11 @@ comptime {
     // fails the static-LIBRARY compile (instance_seam is the lib root), not only
     // measure_seam's native test. Mirrors the instance-layout gate above (Ф13/Ф14).
     measure_seam.assertMeasureLayoutAtBuild();
+    // The Phase-14b shape-seam contract's layout gate, referenced from the same
+    // root comptime so a drifted ShapeRequest/PlacedGlyphExtern offset fails the
+    // static-LIBRARY compile too (Ф14, the variable-length mirror of the measure
+    // gate above).
+    shape_seam.assertShapeLayoutAtBuild();
 }
 
 /// The opaque seam handle Swift holds as a `*anyopaque`. It owns the shadow tree,
@@ -124,6 +133,26 @@ const Seam = struct {
     /// inside it stays valid for the seam's lifetime; a single fit-content label is
     /// the only text node in the measure scene, so one context suffices.
     measure_context: MeasureContext,
+    /// The Phase-14b UPWARD shape-seam callback slot: the Core Text shape fn Swift
+    /// installs via facet_seam_set_shape_callback, read LIVE at shape time. The
+    /// shape pass's ShapeContext holds `&seam.shape_fn` (a pointer to THIS slot), so
+    /// installing after the tree is built needs no tree-walk patch. `null` until
+    /// installed; a shape with a null slot is a CHECKED `orelse unreachable` panic
+    /// under .ReleaseSafe (the install-order invariant must hold).
+    shape_fn: ?ShapeFn,
+    /// The ShapeContext the shape pass hands the adapter, pinned at a stable address
+    /// so `&seam.shape_fn` inside it stays valid for the seam's lifetime. font_size
+    /// is overwritten per text node at build (a scene fixture, like measure_context).
+    shape_context: ShapeContext,
+    /// The seam-owned growable scratch the shape adapter writes glyphs into before
+    /// the arena dupe — NOT the tree arena and NOT the producer's Instance MTLBuffer
+    /// (it holds PlacedGlyphExtern, the seam's own transport). Unmanaged: the seam's
+    /// gpa is passed per grow; deinit'd at destroy.
+    shape_scratch: std.ArrayList(shape_seam.PlacedGlyphExtern),
+    /// The count of real Zig→Swift shape crossings so far. A static scene shapes its
+    /// text leaf exactly once (gated on shape_source), so this stays 1 across two
+    /// produces (the anti-chatty-seam guarantee for the shape half, Р10/§4).
+    shape_crossings: u32,
 };
 
 /// The drawable extent the reference tree is laid out into — the КТ-2 / e2e scene
@@ -153,6 +182,12 @@ export fn facet_seam_create() callconv(.c) ?*anyopaque {
         // measure scene's text node can point its MeasureContext at the seam field.
         // font_size is overwritten per text node at build (it is a scene fixture).
         .measure_context = .{ .measure_fn_slot = &seam.measure_fn, .font_size = 0 },
+        .shape_fn = null,
+        // The shape context's slot pointer is wired to THIS seam's stable shape_fn
+        // here, mirroring measure_context; font_size is overwritten at build.
+        .shape_context = .{ .shape_fn_slot = &seam.shape_fn, .font_size = 0 },
+        .shape_scratch = .empty,
+        .shape_crossings = 0,
     };
     return seam;
 }
@@ -162,6 +197,7 @@ export fn facet_seam_create() callconv(.c) ?*anyopaque {
 /// teardown is safe.
 export fn facet_seam_destroy(handle: ?*anyopaque) callconv(.c) void {
     const seam = cast(handle) orelse return;
+    seam.shape_scratch.deinit(seam.gpa);
     seam.producer.deinit();
     seam.tree.deinit();
     seam.gpa.destroy(seam);
@@ -204,6 +240,28 @@ export fn facet_seam_measure_crossings(handle: ?*anyopaque) callconv(.c) u32 {
     return @intCast(seam.tree.measure_cache.invocation_count);
 }
 
+/// Installs the Phase-14b shape callback (the Swift Core Text seam, or a Zig stub in
+/// host-native tests) into the seam's live slot. Rejects a null fn pointer with a
+/// non-zero status (the slot stays unchanged); on success stores it and returns 0.
+/// The shape pass's ShapeContext already points at `&seam.shape_fn`, so the value is
+/// read live at the next shape — no tree-walk patch. MUST be called BEFORE the first
+/// give-instances that shapes the scene (the install-order invariant).
+export fn facet_seam_set_shape_callback(handle: ?*anyopaque, callback: ?ShapeFn) callconv(.c) c_int {
+    const seam = cast(handle) orelse return -1;
+    const shape_fn = callback orelse return -1;
+    seam.shape_fn = shape_fn;
+    return 0;
+}
+
+/// The count of real Zig→Swift shape crossings so far. A static scene shapes its
+/// text leaf exactly once (the shape_source gate), so this stays 1 across two
+/// produces — the anti-chatty-seam guarantee for the shape half (Р10/§4). 0 on a
+/// null handle.
+export fn facet_seam_shape_crossings(handle: ?*anyopaque) callconv(.c) u32 {
+    const seam = cast(handle) orelse return 0;
+    return seam.shape_crossings;
+}
+
 /// Lays out the tree rooted at root_id, runs the dirty recompute for the frame
 /// stats, then writes the instance array straight into the recorded target. On a
 /// fitting write it returns the instance count (≥ 0); on an overflow it returns
@@ -219,6 +277,12 @@ export fn facet_seam_give_instances(handle: ?*anyopaque, root_id: u32, width: f3
 
     layout.layout(&seam.tree, root, .{ .x = 0, .y = 0, .width = width, .height = height }) catch return -1;
     const recomputed = dirty.recomputeDirty(&seam.tree, root) catch return -1;
+
+    // The Phase-14b shape pass: after place positioned every .text node, cross the
+    // shape seam for each one not yet shaped and write the per-glyph geometry onto
+    // node.placed_glyphs so the producer expands it into glyph instances. Runs
+    // before buildInto so the count it reserves covers the placed glyphs.
+    shapeTextNodes(seam, root) catch return -1;
 
     const outcome = seam.producer.buildInto(root, target) catch return -1;
     switch (outcome) {
@@ -312,6 +376,37 @@ fn cast(handle: ?*anyopaque) ?*Seam {
     return @ptrCast(@alignCast(handle orelse return null));
 }
 
+/// The Phase-14b shape pass: a post-order walk that, for each .text node not yet
+/// shaped, crosses the seam to shape its laid-out string, dupes the returned glyphs
+/// into the tree arena onto node.placed_glyphs (the frame-stable copy — the seam
+/// scratch is borrowed and reused per call), and marks the provenance. Gated on
+/// shape_source == .unshaped so a static frame re-shapes nothing (the anti-chatty
+/// shape seam). Post-order so the walk reads each node's final placed rect (place
+/// already ran top-down, but post-order matches the measure-pass discipline). The
+/// arena allocator is re-fetched from the stable *Tree per dupe (never stored).
+fn shapeTextNodes(seam: *Seam, node: *Node) std.mem.Allocator.Error!void {
+    for (node.children.items) |child| try shapeTextNodes(seam, child);
+    if (!needsShaping(seam, node)) return;
+
+    seam.shape_context.font_size = node.font_size;
+    const glyphs = try shape_seam.shapeThroughSeam(&seam.shape_context, &seam.shape_scratch, seam.gpa, node);
+    node.placed_glyphs = try seam.tree.arena.allocator().dupe(PlacedGlyph, glyphs);
+    node.shape_source = .shape_cross;
+    seam.shape_crossings += 1;
+}
+
+/// Whether a node crosses the shape seam this frame: a .text node the shape pass has
+/// not yet crossed for (shape_source == .unshaped) WHEN a shape callback is
+/// installed. The provenance gate is the anti-chatty signal (consistent with the
+/// measure cache's invocation discipline, ready for a future layout-dirty re-shape
+/// phase); the installed-callback gate keeps the measure-only path (Phase-14 e2e: a
+/// measure scene produced with no shape callback) from crossing into the checked
+/// `orelse unreachable` — a text leaf simply stays unshaped and emits no glyphs,
+/// exactly the pre-14b state. The shape e2e/КТ-2/app install the callback first.
+fn needsShaping(seam: *const Seam, node: *const Node) bool {
+    return node.kind == .text and node.shape_source == .unshaped and seam.shape_fn != null;
+}
+
 /// The single ASYMMETRIC reference scene both the golden writer and the e2e test
 /// drive through THIS Zig code (never rebuilt in Swift), so they are byte-identical
 /// by construction. A row container splits the 1024×640 frame into a TOP band and a
@@ -388,6 +483,11 @@ const MUTATED_TOP_COLOR = Rgb{ .r = 0.30, .g = 0.55, .b = 0.90 };
 const MEASURE_STRING = "Facet";
 const MEASURE_FONT_SIZE: f32 = 32;
 const MEASURE_LABEL_COLOR = Rgb{ .r = 0.90, .g = 0.92, .b = 0.96 };
+/// The Phase-14b glyph color: a dark ink that tints the R8 coverage so the shaped
+/// "Facet" reads legibly against the light label box. A .text node's color tints its
+/// glyph instances (instances.glyphInstance), so without it the glyphs default to a
+/// fully transparent color_a == 0 and draw nothing.
+const MEASURE_TEXT_COLOR = Rgb{ .r = 0.10, .g = 0.11, .b = 0.16 };
 
 /// Builds the SEPARATE measure scene: a fixed full-frame root with a single
 /// fit-content label container that hugs a .text leaf. The leaf carries its string,
@@ -432,7 +532,18 @@ fn buildMeasureReferenceTree(seam: *Seam) std.mem.Allocator.Error!*Node {
     label.sizing_mode = .fit_content;
     label.text = MEASURE_STRING;
     label.font_size = MEASURE_FONT_SIZE;
+    // The glyph ink color: a .text node's color tints its glyph instances, so the
+    // shaped "Facet" reads as dark ink on the light label box (an unset color_a == 0
+    // would draw nothing).
+    label.color_r = MEASURE_TEXT_COLOR.r;
+    label.color_g = MEASURE_TEXT_COLOR.g;
+    label.color_b = MEASURE_TEXT_COLOR.b;
+    label.color_a = 1;
     seam.measure_context.font_size = MEASURE_FONT_SIZE;
+    // The shape pass reads the node's own font_size per cross (shapeTextNodes), so
+    // this seam-level seed mirrors measure_context for parity; the per-node write is
+    // the authority.
+    seam.shape_context.font_size = MEASURE_FONT_SIZE;
     label.measure_callback = .{
         .context = &seam.measure_context,
         .measure = measure_seam.measureThroughSeam,
@@ -662,4 +773,100 @@ test "set-measure-callback rejects a null fn and is a no-op on a null handle, an
 
     // No produce yet → no crossing.
     try testing.expectEqual(@as(u32, 0), facet_seam_measure_crossings(handle));
+}
+
+/// A Zig stub ShapeFn standing in for the Swift Core Text shape seam in host-native
+/// measure-scene tests (real Core Text is host-unavailable). It emits one glyph per
+/// byte at a strictly-increasing center_x anchored at the request origin, so the
+/// scene asserts the glyph instances are produced and ordered. On a too-small
+/// capacity it writes nothing and returns the overflow encoding.
+const STUB_GLYPH_ADVANCE: f32 = 18;
+
+fn stubShapeCallback(request: *const shape_seam.ShapeRequest, destination: [*]shape_seam.PlacedGlyphExtern, capacity: c_long) callconv(.c) c_long {
+    const required: usize = request.length;
+    if (@as(c_long, @intCast(required)) > capacity) {
+        return -(@as(c_long, @intCast(required)) + 1);
+    }
+    var index: usize = 0;
+    while (index < required) : (index += 1) {
+        const step: f32 = @floatFromInt(index);
+        destination[index] = .{
+            .center_x = request.origin_x + step * STUB_GLYPH_ADVANCE,
+            .center_y = request.origin_y + request.font_size,
+            .width = request.font_size,
+            .height = request.font_size,
+            .atlas_min_u = 0,
+            .atlas_min_v = 0,
+            .atlas_max_u = 1,
+            .atlas_max_v = 1,
+        };
+    }
+    return @intCast(required);
+}
+
+test "the measure scene shapes its text leaf through the installed shape seam and emits one glyph instance per byte" {
+    const handle = createSeam();
+    defer facet_seam_destroy(handle);
+
+    // Both upward seams installed BEFORE the first produce (the install-order
+    // invariant: a measure/shape with a null slot is a checked panic).
+    try testing.expectEqual(@as(c_int, 0), facet_seam_set_measure_callback(handle, stubMeasureCallback));
+    try testing.expectEqual(@as(c_int, 0), facet_seam_set_shape_callback(handle, stubShapeCallback));
+
+    const root_id = facet_seam_build_measure_tree(handle);
+    var buffer: [16]Instance = undefined;
+    _ = facet_seam_set_base_pointer(handle, &buffer, buffer.len);
+    const count = facet_seam_give_instances(handle, root_id, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+
+    // The text leaf (id 2) gained one placed glyph per byte and recorded the shape
+    // crossing provenance.
+    const seam = cast(handle).?;
+    const label = seam.tree.lookup(2).?;
+    try testing.expectEqual(@as(usize, MEASURE_STRING.len), (label.placed_glyphs orelse &.{}).len);
+    try testing.expectEqual(tree.ShapeSource.shape_cross, label.shape_source);
+
+    // The produced instances are the background root, the label container, and one
+    // glyph instance per byte; the glyph instances carry the glyph type and follow
+    // the SDF rects in forward paint order.
+    try testing.expectEqual(@as(c_long, 2 + @as(c_long, MEASURE_STRING.len)), count);
+    const glyph_type = @intFromEnum(instances.InstanceType.glyph);
+    var index: usize = 2;
+    while (index < @as(usize, @intCast(count))) : (index += 1) {
+        try testing.expectEqual(@as(u32, glyph_type), buffer[index].type);
+    }
+    // The glyph centers strictly increase along the line (no fixed pen / overlap).
+    try testing.expect(buffer[3].positionX > buffer[2].positionX);
+}
+
+test "the shape crossing counter stays one after two produces of the static measure scene" {
+    const handle = createSeam();
+    defer facet_seam_destroy(handle);
+
+    try testing.expectEqual(@as(c_int, 0), facet_seam_set_measure_callback(handle, stubMeasureCallback));
+    try testing.expectEqual(@as(c_int, 0), facet_seam_set_shape_callback(handle, stubShapeCallback));
+    const root_id = facet_seam_build_measure_tree(handle);
+    var buffer: [16]Instance = undefined;
+    _ = facet_seam_set_base_pointer(handle, &buffer, buffer.len);
+
+    _ = facet_seam_give_instances(handle, root_id, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+    // The second produce finds the text leaf already shape_cross, so it does NOT
+    // re-cross — the anti-chatty shape seam.
+    _ = facet_seam_give_instances(handle, root_id, REFERENCE_WIDTH, REFERENCE_HEIGHT);
+    try testing.expectEqual(@as(u32, 1), facet_seam_shape_crossings(handle));
+}
+
+test "set-shape-callback rejects a null fn and a null handle, and crossings reads zero before any produce" {
+    const handle = createSeam();
+    defer facet_seam_destroy(handle);
+
+    // A null fn pointer is rejected (the slot stays null); a valid one is accepted.
+    try testing.expect(facet_seam_set_shape_callback(handle, null) < 0);
+    try testing.expectEqual(@as(c_int, 0), facet_seam_set_shape_callback(handle, stubShapeCallback));
+
+    // A null handle is a distinct boundary no-op on every shape export.
+    try testing.expect(facet_seam_set_shape_callback(null, stubShapeCallback) < 0);
+    try testing.expectEqual(@as(u32, 0), facet_seam_shape_crossings(null));
+
+    // No produce yet → no crossing.
+    try testing.expectEqual(@as(u32, 0), facet_seam_shape_crossings(handle));
 }

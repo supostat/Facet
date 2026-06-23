@@ -69,8 +69,28 @@ enum ReferenceZigTree {
     // rect width) back through facet_seam_node_laid_out_main.
     static let measureLabelContainerIdOffset: UInt32 = 1
 
+    // The text leaf is the third node the Zig measure scene creates (root id, then
+    // the label container, then the text leaf), so its id is the root id + 2. The
+    // shape e2e reads its laid-out main back through facet_seam_node_laid_out_main to
+    // assert the fit-content leaf ITSELF (not only the produced glyph suffix) was
+    // measured to a non-zero text width.
+    static let measureTextLeafIdOffset: UInt32 = 2
+
     // The float tolerance the seam-fidelity / geometry asserts allow: both sides
     // call the identical Core Text path so they agree to the bit, but a tiny slack
     // absorbs any Float<->CGFloat round without weakening the whole-measure check.
     static let measureTolerance: Float = 0.01
+
+    // The Phase-14b shape↔measure agreement tolerance: the measured main
+    // (CTLineGetTypographicBounds width) and the shaped line's total advance
+    // ((last.origin.x − lineOrigin.x) + last.advance) can differ sub-pixel on
+    // trailing whitespace, so the agreement check is a tolerance, NOT bit-equality.
+    // "Facet" is whitespace-free so it holds tight; the slack keeps a future string
+    // from making it flaky.
+    static let shapeTolerance: Float = 0.5
+
+    // The committed Phase-14b text-render golden, written by the КТ-2
+    // --write-reference path (generated, not hand-authored). The scene is the
+    // measure scene now rendering legible proportional Core Text.
+    static let phase14bTextGoldenName = "phase-14b-text.png"
 }

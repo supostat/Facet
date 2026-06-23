@@ -47,6 +47,16 @@ final class Bridge {
         let measureStatus = facet_seam_set_measure_callback(handle, facetMeasureText)
         precondition(measureStatus == 0, "facet_seam_set_measure_callback rejected the callback (status \(measureStatus))")
 
+        // Install the Phase-14b shape callback under the same install-order
+        // discipline. It needs the live Atlas, which the @convention(c) closure
+        // cannot capture (the C contract has no user-data pointer), so
+        // makeFacetShapeText sets a file-private slot in ShapeCallback.swift before
+        // returning the closure. The Phase-13 reference tree has no text node, so the
+        // callback installs dormant for it; a text scene built through the same seam
+        // finds it already live.
+        let shapeStatus = facet_seam_set_shape_callback(handle, makeFacetShapeText(atlas: renderer.atlas))
+        precondition(shapeStatus == 0, "facet_seam_set_shape_callback rejected the callback (status \(shapeStatus))")
+
         rehandBase()
     }
 

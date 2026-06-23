@@ -65,6 +65,45 @@ typedef struct {
 // crossing); a cache hit bypasses it (the anti-chatty-seam guarantee).
 typedef void (*FacetMeasureCallback)(const FacetMeasureRequest *request, FacetMeasureResult *result);
 
+// The C mirror of the Zig `ShapeRequest`/`PlacedGlyphExtern` extern structs
+// (shape_seam.zig) — the SECOND upward half of the lower seam (Ф14, Р10), the
+// VARIABLE-LENGTH mirror of the measure seam. The Zig core asks Swift to shape a
+// text run with real Core Text and reads the per-glyph geometry back. The field
+// names, types, and order are the frozen contract pinned by the Zig comptime layout
+// assertion (FacetShapeRequest 32 bytes / 8-align, offsets {bytes:0, length:8,
+// font_size:16, origin_x:20, origin_y:24, proposed_wrap_width:28}; FacetPlacedGlyph
+// 32 bytes / 4-align == tree.PlacedGlyph, offsets {center_x:0 .. atlas_max_v:28}).
+// The `bytes` pointer is a zero-copy borrow valid only within the call. origin is
+// the text node's ABSOLUTE laid-out top-left (PlacedGlyph centers are absolute);
+// proposed_wrap_width is carried but UNUSED (single-line, no wrap shaper yet).
+typedef struct {
+    const uint8_t *bytes;
+    size_t length;
+    float font_size;
+    float origin_x;
+    float origin_y;
+    float proposed_wrap_width;
+} FacetShapeRequest;
+
+typedef struct {
+    float center_x;
+    float center_y;
+    float width;
+    float height;
+    float atlas_min_u;
+    float atlas_min_v;
+    float atlas_max_u;
+    float atlas_max_v;
+} FacetPlacedGlyph;
+
+// The shape callback Swift installs into the seam: given a request, write up to
+// `capacity` glyphs into the destination buffer and return the count written (>= 0),
+// or -(required + 1) (<= -1) when the capacity is too small so Zig grows its
+// seam-owned scratch and re-calls (mirrors give-instances' count-or-overflow
+// encoding). Invoked once per unshaped text node per static scene (the anti-chatty
+// shape seam).
+typedef long (*FacetShapeCallback)(const FacetShapeRequest *request, FacetPlacedGlyph *destination, long capacity);
+
 // The C decls for the Zig callconv(.c) exports (instance_seam.zig). The seam owns
 // the shadow tree + instance producer behind an opaque handle; Swift drives the
 // per-frame has-changed -> give-instances loop and hands a StorageModeShared
@@ -125,5 +164,15 @@ uint32_t facet_seam_build_measure_tree(void *handle);
 // the measure scene's label container is a row, so main == width). After a produce
 // this hugs the real Core-Text-measured text width. 0 on a null handle / unknown id.
 float facet_seam_node_laid_out_main(void *handle, uint32_t node_id);
+
+// Install the Phase-14b shape callback (the Swift Core Text seam) into the seam's
+// live slot. Rejects a null fn / null handle with a negative status; returns 0 on
+// success. MUST be called before the first give-instances that shapes the scene.
+int facet_seam_set_shape_callback(void *handle, FacetShapeCallback callback);
+
+// The count of real Zig->Swift shape crossings so far. A static scene shapes its
+// text leaf once, so this stays 1 across two produces (the anti-chatty shape seam).
+// 0 on a null handle.
+uint32_t facet_seam_shape_crossings(void *handle);
 
 #endif

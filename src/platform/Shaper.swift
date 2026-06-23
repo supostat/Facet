@@ -15,6 +15,24 @@ struct ShapedGlyph {
     let advance: Float
 }
 
+// One shaped glyph's absolute placement geometry for the Phase-14b shape seam: the
+// cell CENTER in drawable pixels, the full cell extent, and the glyph's normalized
+// atlas sub-rectangle — the exact shape of `tree.PlacedGlyph` / `FacetPlacedGlyph`,
+// header-free so it lives in Shaper (the ShapeCallback closure copies it field-for-
+// field into a FacetPlacedGlyph). It is the same cell geometry `Shaper.instances`
+// bakes into a `.glyph` Instance, only emitted as plain geometry the seam transports
+// rather than a full Instance.
+struct PlacedGlyphGeometry {
+    let centerX: Float
+    let centerY: Float
+    let width: Float
+    let height: Float
+    let atlasMinU: Float
+    let atlasMinV: Float
+    let atlasMaxU: Float
+    let atlasMaxV: Float
+}
+
 // The external scene supplier for proportionally-shaped text: turns a string into
 // the [Instance] array the Renderer draws, one glyph instance per shaped glyph.
 // Where TextLayout advances a FIXED monospace pen, the Shaper hands the string to
@@ -102,6 +120,53 @@ enum Shaper {
             )
         }
         return instances
+    }
+
+    // Shapes the string and emits each glyph's absolute placement geometry for the
+    // Phase-14b shape seam, reusing the `shape` + `atlas.lookup` path but returning
+    // plain `PlacedGlyphGeometry` (not `.glyph` Instances). `origin` is the laid-out
+    // line origin in top-left drawable space, on the baseline (the caller derives
+    // baseline_y = box_top + ascent). The ATLAS-GROW hazard (Ф4): atlas.lookup may
+    // grow and RELOCATE every prior entry's normalizedRect, so ALL lookups run first
+    // (forcing every rasterization + any grow to settle), THEN every normalizedRect
+    // is read from a SECOND lookup against the now-stable atlas — never a rect read
+    // before a later glyph triggers a grow. An empty string shapes to no glyphs.
+    static func placedGlyphs(
+        string: String,
+        font: CTFont,
+        origin: (x: Float, y: Float),
+        atlas: Atlas
+    ) -> [PlacedGlyphGeometry] {
+        let shaped = shape(string: string, font: font, origin: origin)
+        // First pass: look every glyph up so every rasterization and any atlas grow
+        // happens now; the placements returned here may hold pre-grow rects, so they
+        // are NOT read for geometry.
+        for glyph in shaped {
+            _ = atlas.lookup(font: glyph.font, glyph: glyph.glyph)
+        }
+        // Second pass: the atlas is stable (every glyph is cached, no further grow),
+        // so each lookup is a hit returning the final normalizedRect.
+        var placed: [PlacedGlyphGeometry] = []
+        for glyph in shaped {
+            let placement = atlas.lookup(font: glyph.font, glyph: glyph.glyph)
+            let cellWidth = Float(placement.pixelRect.width)
+            let cellHeight = Float(placement.pixelRect.height)
+            let cellLeft = glyph.origin.x + placement.bearing.x
+            let cellTop = glyph.origin.y + placement.bearing.y
+            placed.append(
+                PlacedGlyphGeometry(
+                    centerX: cellLeft + cellWidth / 2,
+                    centerY: cellTop + cellHeight / 2,
+                    width: cellWidth,
+                    height: cellHeight,
+                    atlasMinU: placement.normalizedRect.minU,
+                    atlasMinV: placement.normalizedRect.minV,
+                    atlasMaxU: placement.normalizedRect.maxU,
+                    atlasMaxV: placement.normalizedRect.maxV
+                )
+            )
+        }
+        return placed
     }
 
     // Measures a single line of text with Core Text for the Ф14 UPWARD measure seam

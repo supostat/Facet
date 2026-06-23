@@ -27,6 +27,17 @@ pub const MeasuredSize = struct {
 /// table) so debug.zig reads provenance directly while importing only tree.zig.
 pub const MeasureSource = enum { unmeasured, cache_hit, seam_cross };
 
+/// The provenance of a node's last shape (Phase-14b shape-seam marker, mirroring
+/// MeasureSource): `.unshaped` before the shape pass touches a .text node,
+/// `.shape_cross` once the shape pass crossed the seam and populated
+/// `placed_glyphs`. A Node field (not a side table) so debug.zig reads provenance
+/// directly while importing only tree.zig, and so the shape pass gates a re-shape
+/// on a single authoritative signal: a static frame stays `.shape_cross` and never
+/// re-crosses (the anti-chatty-seam guarantee for the shape half too). Excluded
+/// from PropsUpdate/render_props for the same reason as measure_source/font_size/
+/// placed_glyphs — it is not a host prop and never touches the dirty.zig classify.
+pub const ShapeSource = enum { unshaped, shape_cross };
+
 /// An injected measure source for a leaf text node (Р10): the layout engine
 /// hands the proposed main-axis extent (wrap width) and the callback returns the
 /// resulting {main, cross} size. The function pointer keeps the platform/Core
@@ -163,9 +174,15 @@ pub const Node = struct {
     // measure.zig writes it on each measure. Excluded from PropsUpdate/render_props
     // for the same reason as font_size above.
     measure_source: MeasureSource = .unmeasured,
+    // The provenance of this node's last shape (Phase-14b shape-seam marker).
+    // Default .unshaped so debug's per-node `shape=` read is defined before any
+    // pass; the shape pass writes .shape_cross when it crosses the seam. Excluded
+    // from PropsUpdate/render_props for the same reason as measure_source above.
+    shape_source: ShapeSource = .unshaped,
     // The shaped, placed glyphs of a .text node (Phase 12), the seam instance
     // production expands into one glyph Instance each. null on a fresh node and
-    // on every .view node; Phase 14 wires the real Core Text shaper.
+    // on every .view node; Phase 14b wires the real Core Text shaper through the
+    // upward shape seam.
     placed_glyphs: ?[]const PlacedGlyph = null,
     preferred: PreferredSize = .{},
 
@@ -326,6 +343,7 @@ test {
     _ = @import("layout.zig");
     _ = @import("measure.zig");
     _ = @import("measure_seam.zig");
+    _ = @import("shape_seam.zig");
     _ = @import("dirty.zig");
     _ = @import("hit_test.zig");
     _ = @import("instances.zig");

@@ -28,45 +28,85 @@ struct ZigTreeHarness {
 
         if CommandLine.arguments.contains("--write-reference") {
             writeReferenceGoldens(metallibPath: metallibPath)
+            writeMeasureSceneGolden(metallibPath: metallibPath)
             return
         }
 
         if CommandLine.arguments.contains("--measure") {
-            printMeasureScene()
+            printMeasureScene(metallibPath: metallibPath)
             return
         }
 
         runLiveWindow(metallibPath: metallibPath)
     }
 
-    // КТ-2 Ф14: build the SEPARATE measure scene, install the production Core Text
-    // callback BEFORE producing (the install-order invariant), produce once, and
-    // print the fit-content label container's seam-measured main extent — the SDF
-    // box that hugs the measured text. No window and no golden: nothing legible
-    // renders until the Phase-14b glyph-injection half lands, so this surfaces the
-    // measured GEOMETRY as data, the eye-check of the upward measure seam.
-    private static func printMeasureScene() {
+    // КТ-2 Ф14/14b: build the SEPARATE measure scene through a Renderer-backed seam,
+    // install BOTH upward Core Text callbacks BEFORE producing (the install-order
+    // invariant), produce once — which measures AND shapes the text leaf into legible
+    // glyphs — and print the fit-content container's seam-measured main extent plus
+    // the shape crossing count. The shape callback needs the renderer's live Atlas,
+    // so this drives the measure scene through the production Renderer + the C
+    // exports (Bridge is hardwired to the Phase-13 reference tree).
+    private static func printMeasureScene(metallibPath: String) {
+        let renderer = Renderer(metallibPath: metallibPath)
+        let scene = produceMeasureScene(renderer: renderer)
+        defer { facet_seam_destroy(scene.handle) }
+
+        let containerMain = facet_seam_node_laid_out_main(scene.handle, scene.rootId + ReferenceZigTree.measureLabelContainerIdOffset)
+        let measureCrossings = facet_seam_measure_crossings(scene.handle)
+        let shapeCrossings = facet_seam_shape_crossings(scene.handle)
+        print("measure scene: \"\(ReferenceZigTree.measureString)\" at \(ReferenceZigTree.measureFontSize)pt")
+        print("  fit-content container hugs a measured main of \(containerMain)px after \(measureCrossings) measure crossing(s)")
+        print("  shaped \(scene.instanceCount - 2) glyph instance(s) after \(shapeCrossings) shape crossing(s)")
+    }
+
+    // Renders the measure scene's legible Core Text glyphs and writes the Phase-14b
+    // text golden. The scene IS the Zig facet_seam_build_measure_tree driven through
+    // both upward seams, so the committed golden is byte-identical to the e2e render
+    // by construction (the КТ-2 eye-check: the §0a real-text legibility view).
+    private static func writeMeasureSceneGolden(metallibPath: String) {
+        let renderer = Renderer(metallibPath: metallibPath)
+        let scene = produceMeasureScene(renderer: renderer)
+        defer { facet_seam_destroy(scene.handle) }
+
+        let frame = renderer.captureSdfFrame(
+            instanceCount: scene.instanceCount,
+            width: ReferenceZigTree.width,
+            height: ReferenceZigTree.height
+        )
+        let url = URL(fileURLWithPath: "tests/snapshots").appendingPathComponent(ReferenceZigTree.phase14bTextGoldenName)
+        PngImage.write(bgraPixels: frame.bgraPixels, width: frame.width, height: frame.height, url: url)
+        print("wrote \(ReferenceZigTree.phase14bTextGoldenName)")
+    }
+
+    // The driven measure scene: the seam handle, its root id, and the produced
+    // instance count, written into the renderer's shared buffer. Both upward
+    // callbacks are installed before the produce (the install-order invariant); the
+    // shape callback reads the renderer's live Atlas.
+    private struct DrivenMeasureScene {
+        let handle: UnsafeMutableRawPointer
+        let rootId: UInt32
+        let instanceCount: Int
+    }
+
+    private static func produceMeasureScene(renderer: Renderer) -> DrivenMeasureScene {
         guard let handle = facet_seam_create() else {
             fatalError("facet_seam_create returned null")
         }
-        defer { facet_seam_destroy(handle) }
-
-        let status = facet_seam_set_measure_callback(handle, facetMeasureText)
-        precondition(status == 0, "facet_seam_set_measure_callback rejected the callback (status \(status))")
+        let measureStatus = facet_seam_set_measure_callback(handle, facetMeasureText)
+        precondition(measureStatus == 0, "facet_seam_set_measure_callback rejected the callback (status \(measureStatus))")
+        let shapeStatus = facet_seam_set_shape_callback(handle, makeFacetShapeText(atlas: renderer.atlas))
+        precondition(shapeStatus == 0, "facet_seam_set_shape_callback rejected the callback (status \(shapeStatus))")
 
         let rootId = facet_seam_build_measure_tree(handle)
         precondition(rootId != UInt32.max, "facet_seam_build_measure_tree failed")
 
-        var buffer = [FacetInstance](repeating: FacetInstance(), count: 16)
-        buffer.withUnsafeMutableBufferPointer { pointer in
-            _ = facet_seam_set_base_pointer(handle, pointer.baseAddress, UInt32(pointer.count))
-            _ = facet_seam_give_instances(handle, rootId, Float(ReferenceZigTree.width), Float(ReferenceZigTree.height))
-        }
+        let base = renderer.sharedInstanceBufferBaseAddress.assumingMemoryBound(to: FacetInstance.self)
+        _ = facet_seam_set_base_pointer(handle, base, UInt32(renderer.sharedInstanceCapacity))
+        let count = facet_seam_give_instances(handle, rootId, Float(ReferenceZigTree.width), Float(ReferenceZigTree.height))
+        precondition(count >= 0, "the measure scene produce overflowed or failed (status \(count))")
 
-        let containerMain = facet_seam_node_laid_out_main(handle, rootId + ReferenceZigTree.measureLabelContainerIdOffset)
-        let crossings = facet_seam_measure_crossings(handle)
-        print("measure scene: \"\(ReferenceZigTree.measureString)\" at \(ReferenceZigTree.measureFontSize)pt")
-        print("  fit-content container hugs a measured main of \(containerMain)px after \(crossings) seam crossing(s)")
+        return DrivenMeasureScene(handle: handle, rootId: rootId, instanceCount: Int(count))
     }
 
     // Drives the Zig seam straight into the renderer's shared buffer and captures

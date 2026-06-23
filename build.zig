@@ -27,6 +27,7 @@ const app_sources = [_][]const u8{
     "src/platform/TextLayout.swift",
     "src/platform/Shaper.swift",
     "src/platform/MeasureCallback.swift",
+    "src/platform/ShapeCallback.swift",
     "src/platform/Renderer.swift",
     "src/platform/Bridge.swift",
     "src/platform/FrameLoop.swift",
@@ -115,6 +116,7 @@ const zig_tree_sources = [_][]const u8{
     "src/platform/TextLayout.swift",
     "src/platform/Shaper.swift",
     "src/platform/MeasureCallback.swift",
+    "src/platform/ShapeCallback.swift",
     "src/platform/Renderer.swift",
     "src/platform/Bridge.swift",
     "src/platform/FrameLoop.swift",
@@ -137,6 +139,7 @@ const lower_seam_test_sources = [_][]const u8{
     "src/platform/TextLayout.swift",
     "src/platform/Shaper.swift",
     "src/platform/MeasureCallback.swift",
+    "src/platform/ShapeCallback.swift",
     "src/platform/Renderer.swift",
     "src/platform/Bridge.swift",
     "tests/snapshots/PngImage.swift",
@@ -163,6 +166,32 @@ const measure_seam_test_sources = [_][]const u8{
     "src/platform/MeasureCallback.swift",
     "tests/snapshots/ReferenceZigTree.swift",
     "tests/e2e/MeasureSeamEndToEndTests.swift",
+};
+
+// The Phase-14b shape-seam end-to-end test: a seam consumer (links the core lib +
+// header) that drives BOTH upward seams through the C exports — install the
+// production measure + shape callbacks, build the measure scene, produce, and render
+// the legible Core Text glyphs through the Phase-13 lower seam. UNLIKE the
+// measure-only test it constructs a Renderer (the shape callback needs its Atlas,
+// the glyph fragment branch samples it), so it loads the metallib and links the full
+// seam stack plus the comparator/PngImage and the phase-14b text golden.
+const shape_seam_test_sources = [_][]const u8{
+    "src/platform/Instance.swift",
+    "src/platform/MetallibLocator.swift",
+    "src/platform/ShelfPacker.swift",
+    "src/platform/GlyphRasterizer.swift",
+    "src/platform/Atlas.swift",
+    "src/platform/AtlasInspector.swift",
+    "src/platform/TextLayout.swift",
+    "src/platform/Shaper.swift",
+    "src/platform/MeasureCallback.swift",
+    "src/platform/ShapeCallback.swift",
+    "src/platform/Renderer.swift",
+    "src/platform/Bridge.swift",
+    "tests/snapshots/PngImage.swift",
+    "tests/snapshots/SnapshotComparator.swift",
+    "tests/snapshots/ReferenceZigTree.swift",
+    "tests/e2e/ShapeSeamEndToEndTests.swift",
 };
 
 // CoreText is required by GlyphRasterizer (the only Core Text imaging site);
@@ -317,6 +346,14 @@ pub fn build(b: *std.Build) void {
     const measure_seam_test_run = runBinaryWithoutMetallib(b, measure_seam_test_binary, true);
     measure_seam_test_run.expectExitCode(0);
 
+    // The Phase-14b shape-seam end-to-end test: a seam consumer (links the core lib +
+    // header) that drives BOTH upward seams through the C exports and renders the
+    // legible Core Text glyphs. It constructs a Renderer and samples the atlas, so it
+    // loads the metallib (like the lower-seam e2e). Metal API Validation ON.
+    const shape_seam_test_binary = compileSwift(b, "shape-seam-e2e-test", &shape_seam_test_sources, .debug, core_lib);
+    const shape_seam_test_run = runBinary(b, shape_seam_test_binary, metallib, true);
+    shape_seam_test_run.expectExitCode(0);
+
     // The Block-II shadow-tree engine core: a NATIVE zig test artifact (no swiftc,
     // no metallib). tree.zig pulls debug.zig, layout.zig, measure.zig, dirty.zig,
     // hit_test.zig, and instances.zig tests in via co-located imports, so this
@@ -344,6 +381,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&shaper_test_run.step);
     test_step.dependOn(&lower_seam_test_run.step);
     test_step.dependOn(&measure_seam_test_run.step);
+    test_step.dependOn(&shape_seam_test_run.step);
     test_step.dependOn(&core_test_run.step);
     test_step.dependOn(&seam_test_run.step);
 }

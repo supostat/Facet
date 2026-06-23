@@ -123,7 +123,8 @@ fn writeTraceMachine(node: *Node, writer: *std.Io.Writer) std.Io.Writer.Error!vo
     try writer.print(" preferred=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT, .{ node.preferred.main, node.preferred.cross });
     try writer.print(" avail=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT, .{ avail.main, avail.cross });
     try writer.print(" rect=" ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT ++ "," ++ FLOAT_FORMAT, .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
-    try writer.print(" measure={s}\n", .{@tagName(node.measure_source)});
+    try writer.print(" measure={s}", .{@tagName(node.measure_source)});
+    try writer.print(" glyphs={d} shape={s}\n", .{ glyphCount(node), @tagName(node.shape_source) });
 }
 
 fn writeTracePretty(node: *Node, writer: *std.Io.Writer, depth: usize) std.Io.Writer.Error!void {
@@ -134,7 +135,16 @@ fn writeTracePretty(node: *Node, writer: *std.Io.Writer, depth: usize) std.Io.Wr
     try writer.print(" preferred=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")", .{ node.preferred.main, node.preferred.cross });
     try writer.print(" avail=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")", .{ avail.main, avail.cross });
     try writer.print(" rect=(" ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ", " ++ FLOAT_FORMAT ++ ")", .{ node.layout.x, node.layout.y, node.layout.w, node.layout.h });
-    try writer.print(" measure={s}\n", .{@tagName(node.measure_source)});
+    try writer.print(" measure={s}", .{@tagName(node.measure_source)});
+    try writer.print(" glyphs={d} shape={s}\n", .{ glyphCount(node), @tagName(node.shape_source) });
+}
+
+/// The shaped glyph count of a node for the trace marker: zero on a node the shape
+/// pass has not placed glyphs on (the .unshaped default and every .view node), the
+/// placed-glyph count once the shape seam crossed. Read directly from the Node
+/// field so debug imports only tree.zig.
+fn glyphCount(node: *Node) usize {
+    return (node.placed_glyphs orelse &.{}).len;
 }
 
 /// The overlay machine line: element bounds, dirty flags, and the hit rect, all
@@ -461,8 +471,8 @@ test "layout trace machine dump records avail and rect per node" {
     defer std.testing.allocator.free(trace);
 
     const expected =
-        "node id=0 proposed=300.0000 preferred=0.0000,0.0000 avail=300.0000,100.0000 rect=0.0000,0.0000,300.0000,100.0000 measure=unmeasured\n" ++
-        "node id=1 proposed=280.0000 preferred=0.0000,0.0000 avail=280.0000,90.0000 rect=10.0000,5.0000,280.0000,90.0000 measure=unmeasured\n";
+        "node id=0 proposed=300.0000 preferred=0.0000,0.0000 avail=300.0000,100.0000 rect=0.0000,0.0000,300.0000,100.0000 measure=unmeasured glyphs=0 shape=unshaped\n" ++
+        "node id=1 proposed=280.0000 preferred=0.0000,0.0000 avail=280.0000,90.0000 rect=10.0000,5.0000,280.0000,90.0000 measure=unmeasured glyphs=0 shape=unshaped\n";
     try std.testing.expectEqualStrings(expected, trace);
 }
 
@@ -507,8 +517,8 @@ test "layout trace pretty renders indented avail/rect with the column projection
     defer std.testing.allocator.free(pretty);
 
     const expected =
-        "#0 proposed=400.0000 preferred=(0.0000, 0.0000) avail=(400.0000, 200.0000) rect=(0.0000, 0.0000, 200.0000, 400.0000) measure=unmeasured\n" ++
-        "  #1 proposed=380.0000 preferred=(0.0000, 0.0000) avail=(380.0000, 184.0000) rect=(10.0000, 12.0000, 184.0000, 180.0000) measure=unmeasured\n";
+        "#0 proposed=400.0000 preferred=(0.0000, 0.0000) avail=(400.0000, 200.0000) rect=(0.0000, 0.0000, 200.0000, 400.0000) measure=unmeasured glyphs=0 shape=unshaped\n" ++
+        "  #1 proposed=380.0000 preferred=(0.0000, 0.0000) avail=(380.0000, 184.0000) rect=(10.0000, 12.0000, 184.0000, 180.0000) measure=unmeasured glyphs=0 shape=unshaped\n";
     try std.testing.expectEqualStrings(expected, pretty);
 }
 
@@ -525,8 +535,8 @@ test "layout trace enumerates two roots by ascending id" {
     defer std.testing.allocator.free(trace);
 
     const expected =
-        "node id=0 proposed=200.0000 preferred=0.0000,0.0000 avail=200.0000,50.0000 rect=0.0000,0.0000,200.0000,50.0000 measure=unmeasured\n" ++
-        "node id=1 proposed=100.0000 preferred=0.0000,0.0000 avail=100.0000,80.0000 rect=0.0000,0.0000,100.0000,80.0000 measure=unmeasured\n";
+        "node id=0 proposed=200.0000 preferred=0.0000,0.0000 avail=200.0000,50.0000 rect=0.0000,0.0000,200.0000,50.0000 measure=unmeasured glyphs=0 shape=unshaped\n" ++
+        "node id=1 proposed=100.0000 preferred=0.0000,0.0000 avail=100.0000,80.0000 rect=0.0000,0.0000,100.0000,80.0000 measure=unmeasured glyphs=0 shape=unshaped\n";
     try std.testing.expectEqualStrings(expected, trace);
 }
 
@@ -553,6 +563,32 @@ test "layout trace shows the measured proposed extent and a non-zero preferred o
     try std.testing.expect(std.mem.indexOf(u8, trace, "node id=0 proposed=120.0000 preferred=120.0000,40.0000") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "node id=1 proposed=120.0000 preferred=120.0000,40.0000") != null);
     try std.testing.expect(std.mem.indexOf(u8, trace, "preferred=0.0000,0.0000") == null);
+}
+
+test "layout trace marks a shaped text leaf with its glyph count and shape_cross provenance" {
+    var tree = Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    // A .text leaf whose shape pass would have placed glyphs onto it (filled
+    // directly here — debug imports neither the shape seam nor the arena). The
+    // trace must surface the glyph count and the shape_cross provenance, while an
+    // unshaped sibling stays glyphs=0 shape=unshaped.
+    const placed = [_]tree_module.PlacedGlyph{
+        .{ .center_x = 0, .center_y = 0, .width = 1, .height = 1, .atlas_min_u = 0, .atlas_min_v = 0, .atlas_max_u = 1, .atlas_max_v = 1 },
+        .{ .center_x = 2, .center_y = 0, .width = 1, .height = 1, .atlas_min_u = 0, .atlas_min_v = 0, .atlas_max_u = 1, .atlas_max_v = 1 },
+    };
+    const shaped = try tree.createNode(.text);
+    shaped.placed_glyphs = &placed;
+    shaped.shape_source = .shape_cross;
+    const unshaped = try tree.createNode(.text);
+    try tree.appendChild(shaped, unshaped);
+
+    const trace = try traceToString(&tree, false);
+    defer std.testing.allocator.free(trace);
+
+    try std.testing.expect(std.mem.indexOf(u8, trace, "node id=0 ") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "measure=unmeasured glyphs=2 shape=shape_cross\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, trace, "measure=unmeasured glyphs=0 shape=unshaped\n") != null);
 }
 
 test "overlay machine dump emits element bounds, dirty flags, and the hit rect per node, byte-deterministically" {
