@@ -82,6 +82,16 @@ pub fn markDirty(node: *Node, prop: Prop) void {
     }
 }
 
+/// Marks a node structurally layout-dirty and bubbles by the same fixed-main
+/// ancestor rule as a layout-prop change. A structural mutation (CREATE / APPEND /
+/// INSERT / REMOVE) changes the child set, which can change a content-dependent
+/// ancestor's geometry, so it re-uses the prop-change bubble path rather than a
+/// second authority. Wraps the private bubbleLayoutDirty so structural and
+/// prop-driven layout invalidation share the one bubble implementation.
+pub fn markStructuralDirty(node: *Node) void {
+    bubbleLayoutDirty(node);
+}
+
 /// Walks parent links setting layout_dirty on each, stopping INCLUSIVE at the
 /// first node whose main-axis size is fixed (it is marked, then we return): a
 /// fixed-main container clips the re-measure, since its preferred size does not

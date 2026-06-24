@@ -382,7 +382,7 @@ pub fn build(b: *std.Build) void {
     jsc_runtime_test.linkFramework("JavaScriptCore");
     const jsc_runtime_test_run = b.addRunArtifact(jsc_runtime_test);
 
-    const test_step = b.step("test", "Run the Swift snapshot tests and the native Zig engine-core tests (tree, layout, measure, debug, dirty, hit_test, instances, instance-seam, jsc-runtime bridge; Metal validation ON)");
+    const test_step = b.step("test", "Run the Swift snapshot tests and the native Zig engine-core tests (tree, layout, measure, debug, dirty, hit_test, instances, mutations, instance-seam, jsc-runtime bridge; Metal validation ON)");
     test_step.dependOn(&clear_test_run.step);
     test_step.dependOn(&sdf_test_run.step);
     test_step.dependOn(&phase3_test_run.step);

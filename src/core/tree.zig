@@ -257,6 +257,24 @@ pub const Tree = struct {
         return node;
     }
 
+    /// Registers a node under a JS-chosen id (a ghost-node id the host owns, Ф17)
+    /// rather than minting the next internal id. Uses getOrPut, NOT put, so a live
+    /// id is never silently clobbered: a found_existing slot is error.DuplicateId.
+    /// On a fresh id it advances next_id past it so a later internal createNode
+    /// cannot collide with a host id. The errdefer that unregisters the reserved
+    /// slot is installed AFTER getOrPut and BEFORE the value_ptr assignment, so the
+    /// create-OOM path leaves the map free of the half-registered id.
+    pub fn createWithId(self: *Tree, id: u32, kind: Kind) (std.mem.Allocator.Error || error{DuplicateId})!*Node {
+        const gop = try self.nodes.getOrPut(id);
+        if (gop.found_existing) return error.DuplicateId;
+        errdefer _ = self.nodes.remove(id);
+        const node = try self.arena.allocator().create(Node);
+        node.* = .{ .id = id, .kind = kind };
+        gop.value_ptr.* = node;
+        self.next_id = @max(self.next_id, id +| 1);
+        return node;
+    }
+
     pub fn lookup(self: *Tree, id: u32) ?*Node {
         return self.nodes.get(id);
     }
@@ -347,6 +365,7 @@ test {
     _ = @import("dirty.zig");
     _ = @import("hit_test.zig");
     _ = @import("instances.zig");
+    _ = @import("mutations.zig");
 }
 
 test "createNode assigns sequential ids resolvable via lookup" {
@@ -524,4 +543,63 @@ test "updateNodeProps with an all-null update is a no-op" {
     try std.testing.expectEqual(@as(f32, 42), node.position_x);
     try std.testing.expectEqual(Kind.view, node.kind);
     try std.testing.expect(!node.paint_dirty);
+}
+
+test "createWithId registers a JS-chosen id resolvable via lookup" {
+    var tree = Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const node = try tree.createWithId(7, .view);
+
+    try std.testing.expectEqual(@as(u32, 7), node.id);
+    try std.testing.expectEqual(Kind.view, node.kind);
+    try std.testing.expectEqual(node, tree.lookup(7).?);
+}
+
+test "createWithId rejects an already-registered live id without clobbering it" {
+    var tree = Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const first = try tree.createWithId(3, .view);
+    try std.testing.expectError(error.DuplicateId, tree.createWithId(3, .text));
+
+    // The original node is byte-untouched: same pointer, same kind.
+    try std.testing.expectEqual(first, tree.lookup(3).?);
+    try std.testing.expectEqual(Kind.view, tree.lookup(3).?.kind);
+}
+
+test "createWithId advances next_id so a later createNode cannot collide" {
+    var tree = Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    _ = try tree.createWithId(5, .view);
+    const minted = try tree.createNode(.view);
+
+    try std.testing.expectEqual(@as(u32, 6), minted.id);
+    try std.testing.expect(tree.lookup(5).? != minted);
+}
+
+test "createWithId does not lower next_id for an id below the current high-water mark" {
+    var tree = Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const high = try tree.createWithId(10, .view);
+    _ = try tree.createWithId(2, .view);
+    const minted = try tree.createNode(.view);
+
+    try std.testing.expectEqual(@as(u32, 11), minted.id);
+    try std.testing.expectEqual(high, tree.lookup(10).?);
+}
+
+test "an id freed by removeNode can be re-registered via createWithId" {
+    var tree = Tree.init(std.testing.allocator);
+    defer tree.deinit();
+
+    const original = try tree.createWithId(4, .view);
+    tree.removeNode(original);
+    try std.testing.expectEqual(@as(?*Node, null), tree.lookup(4));
+
+    const reborn = try tree.createWithId(4, .text);
+    try std.testing.expectEqual(@as(u32, 4), reborn.id);
+    try std.testing.expectEqual(Kind.text, tree.lookup(4).?.kind);
 }

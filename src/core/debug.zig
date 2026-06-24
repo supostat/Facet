@@ -1,5 +1,6 @@
 const std = @import("std");
 const tree_module = @import("tree.zig");
+const mutations = @import("mutations.zig");
 const Tree = tree_module.Tree;
 const Node = tree_module.Node;
 
@@ -190,6 +191,138 @@ pub fn dumpFrameStats(stats: FrameStats, writer: *std.Io.Writer, pretty: bool) s
         try writer.print(" layout_us={d} produce_us={d}", .{ stats.layout_micros, stats.produce_micros });
     }
     try writer.writeByte('\n');
+}
+
+/// The error set dumpMutations surfaces: only the writer's. A malformed buffer is NOT an
+/// error — it renders an inline marker (`<truncated@N>` / `<unknown tag T>`) and stops,
+/// so the decoder is total over any byte slice and an applyMutations failure can attach
+/// the decode without a second failure mode.
+pub const DumpMutationsError = std.Io.Writer.Error;
+
+/// Decodes a raw mutation buffer into a human/agent-readable listing — the inverse of the
+/// mutations codec, built from the SAME mutations.Cursor the read side is, so it makes the
+/// upper seam transparent for binary-search debugging across the pipeline (§0a). Machine
+/// mode (pretty == false) is the default: one mutation per line in a fixed field order,
+/// ids decimal, propMask as ascending @tagName(Prop), values as FLOAT_FORMAT — byte-
+/// deterministic so an agent diffs "what React generated" against the tree dump. A
+/// malformed buffer renders `<truncated@N>` (a read past the end at byte N) or
+/// `<unknown tag T>` and stops, never reading out of bounds. Decode-once: the same Cursor
+/// walk drives both outputs (pretty only re-spaces the same fields).
+pub fn dumpMutations(bytes: []const u8, writer: *std.Io.Writer, pretty: bool) DumpMutationsError!void {
+    var cursor: mutations.Cursor = .{ .bytes = bytes };
+    while (cursor.offset < bytes.len) {
+        const record_start = cursor.offset;
+        // Read the tag byte directly so an unknown discriminant names its byte value
+        // without relying on the reader's consumed offset.
+        const tag_byte = bytes[record_start];
+        const tag = std.meta.intToEnum(mutations.Tag, tag_byte) catch {
+            try writer.print("<unknown tag {d}>\n", .{tag_byte});
+            return;
+        };
+        cursor.offset += 1;
+        if (try decodeMutation(&cursor, tag, writer, pretty)) |truncated_at| {
+            try writer.print("<truncated@{d}>\n", .{truncated_at});
+            return;
+        }
+    }
+}
+
+/// Decodes one mutation after its tag is consumed, writing its line. Returns null on a
+/// clean decode, or the offset at which a field read hit the buffer end (a truncation
+/// marker the caller renders). Every field read goes through the bounds-checked Cursor,
+/// so a short field reports its start offset and the decoder never reads out of bounds.
+fn decodeMutation(cursor: *mutations.Cursor, tag: mutations.Tag, writer: *std.Io.Writer, pretty: bool) DumpMutationsError!?usize {
+    switch (tag) {
+        .create => {
+            const id_at = cursor.offset;
+            const id = cursor.readId() catch return id_at;
+            const kind_at = cursor.offset;
+            const kind = cursor.readKind() catch return kind_at;
+            if (pretty) {
+                try writer.print("CREATE  id={d} kind={s}\n", .{ id, @tagName(kind) });
+            } else {
+                try writer.print("CREATE id={d} kind={s}\n", .{ id, @tagName(kind) });
+            }
+        },
+        .update => {
+            const id_at = cursor.offset;
+            const id = cursor.readId() catch return id_at;
+            const mask_at = cursor.offset;
+            const mask = cursor.readMask() catch return mask_at;
+            try writer.print("UPDATE id={d} propMask=", .{id});
+            try writeMaskProps(mask, writer);
+            try writer.writeAll(" values=");
+            if (try writeMaskValues(cursor, mask, writer)) |truncated_at| return truncated_at;
+            try writer.writeByte('\n');
+        },
+        .append => {
+            const parent_at = cursor.offset;
+            const parent = cursor.readId() catch return parent_at;
+            const child_at = cursor.offset;
+            const child = cursor.readId() catch return child_at;
+            try writer.print("APPEND parent={d} child={d}\n", .{ parent, child });
+        },
+        .insert => {
+            const parent_at = cursor.offset;
+            const parent = cursor.readId() catch return parent_at;
+            const child_at = cursor.offset;
+            const child = cursor.readId() catch return child_at;
+            const anchor_at = cursor.offset;
+            const anchor = cursor.readId() catch return anchor_at;
+            try writer.print("INSERT parent={d} child={d} anchor={d}\n", .{ parent, child, anchor });
+        },
+        .remove => {
+            const id_at = cursor.offset;
+            const id = cursor.readId() catch return id_at;
+            try writer.print("REMOVE id={d}\n", .{id});
+        },
+    }
+    return null;
+}
+
+/// Writes the set propMask bits as their Prop names in ascending bit order, comma-joined
+/// (e.g. `position_x,color_r`); an empty mask renders `none`. Out-of-range bits (≥
+/// PROP_COUNT) render `?<bit>` so a malformed mask is visible without an enum panic.
+fn writeMaskProps(mask: u32, writer: *std.Io.Writer) DumpMutationsError!void {
+    if (mask == 0) {
+        try writer.writeAll("none");
+        return;
+    }
+    var written: usize = 0;
+    var bit: u5 = 0;
+    while (bit < mutations.PROP_COUNT) : (bit += 1) {
+        if (mask & (@as(u32, 1) << bit) != 0) {
+            if (written != 0) try writer.writeByte(',');
+            try writer.print("{s}", .{@tagName(@as(mutations.Prop, @enumFromInt(bit)))});
+            written += 1;
+        }
+    }
+    var high_bit: u6 = mutations.PROP_COUNT;
+    while (high_bit < 32) : (high_bit += 1) {
+        if (mask & (@as(u32, 1) << @intCast(high_bit)) != 0) {
+            if (written != 0) try writer.writeByte(',');
+            try writer.print("?{d}", .{high_bit});
+            written += 1;
+        }
+    }
+}
+
+/// Writes the popcount(mask) f32 values in ascending bit order, comma-joined under
+/// FLOAT_FORMAT; an empty mask renders nothing after `values=`. Returns the offset of a
+/// value read that hit the buffer end (a truncation), else null.
+fn writeMaskValues(cursor: *mutations.Cursor, mask: u32, writer: *std.Io.Writer) DumpMutationsError!?usize {
+    var written: usize = 0;
+    var bit: u6 = 0;
+    while (bit < 32) : (bit += 1) {
+        if (mask & (@as(u32, 1) << @intCast(bit)) != 0) {
+            const value_at = cursor.offset;
+            const value = cursor.readValue() catch return value_at;
+            if (written != 0) try writer.writeByte(',');
+            try writer.print(FLOAT_FORMAT, .{value});
+            written += 1;
+        }
+    }
+    return null;
 }
 
 /// Test-only: collects the dump into an owned slice via the testing allocator (caller frees).
@@ -663,4 +796,115 @@ test "frame-stats pretty dump adds the timings to the same counters" {
     defer std.testing.allocator.free(pretty);
 
     try std.testing.expectEqualStrings("frame instances=3 draws=1 recomputed=2 layout_us=42 produce_us=17\n", pretty);
+}
+
+/// Test-only: collects a mutation-buffer decode into an owned slice (caller frees).
+fn dumpMutationsToString(bytes: []const u8, pretty: bool) ![]const u8 {
+    var sink: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    errdefer sink.deinit();
+    try dumpMutations(bytes, &sink.writer, pretty);
+    return sink.toOwnedSlice();
+}
+
+/// Little-endian u32 wire bytes for the hand-built mutation buffers below.
+fn leU32(value: u32) [4]u8 {
+    var encoded: [4]u8 = undefined;
+    std.mem.writeInt(u32, &encoded, value, .little);
+    return encoded;
+}
+
+test "the machine-mode mutation decoder renders one fixed line per mutation" {
+    // CREATE id=0 kind=view; CREATE id=1 kind=text; APPEND 0<-1; UPDATE id=1 width=64.
+    const create_kind_view = [_]u8{@intFromEnum(mutations.Tag.create)} ++ leU32(0) ++ [_]u8{@intFromEnum(tree_module.Kind.view)};
+    const create_kind_text = [_]u8{@intFromEnum(mutations.Tag.create)} ++ leU32(1) ++ [_]u8{@intFromEnum(tree_module.Kind.text)};
+    const append = [_]u8{@intFromEnum(mutations.Tag.append)} ++ leU32(0) ++ leU32(1);
+    const width_bits: u32 = @bitCast(@as(f32, 64));
+    const update = [_]u8{@intFromEnum(mutations.Tag.update)} ++ leU32(1) ++ leU32(@as(u32, 1) << mutations.propBit(.width)) ++ leU32(width_bits);
+    const buffer = create_kind_view ++ create_kind_text ++ append ++ update;
+
+    const dumped = try dumpMutationsToString(&buffer, false);
+    defer std.testing.allocator.free(dumped);
+
+    const expected =
+        "CREATE id=0 kind=view\n" ++
+        "CREATE id=1 kind=text\n" ++
+        "APPEND parent=0 child=1\n" ++
+        "UPDATE id=1 propMask=width values=64.0000\n";
+    try std.testing.expectEqualStrings(expected, dumped);
+}
+
+test "the machine-mode mutation decoder is byte-identical across two runs" {
+    const insert = [_]u8{@intFromEnum(mutations.Tag.insert)} ++ leU32(0) ++ leU32(3) ++ leU32(1);
+    const remove = [_]u8{@intFromEnum(mutations.Tag.remove)} ++ leU32(2);
+    const buffer = insert ++ remove;
+
+    const first = try dumpMutationsToString(&buffer, false);
+    defer std.testing.allocator.free(first);
+    const second = try dumpMutationsToString(&buffer, false);
+    defer std.testing.allocator.free(second);
+
+    try std.testing.expectEqualStrings(first, second);
+    try std.testing.expectEqualStrings(
+        "INSERT parent=0 child=3 anchor=1\n" ++ "REMOVE id=2\n",
+        first,
+    );
+}
+
+test "an UPDATE with multiple masked props lists them in ascending bit order" {
+    const r_bits: u32 = @bitCast(@as(f32, 0.25));
+    const x_bits: u32 = @bitCast(@as(f32, 12));
+    const mask = (@as(u32, 1) << mutations.propBit(.position_x)) | (@as(u32, 1) << mutations.propBit(.color_r));
+    // Values follow in ascending bit order: position_x (bit 0) then color_r (bit 4).
+    const update = [_]u8{@intFromEnum(mutations.Tag.update)} ++ leU32(5) ++ leU32(mask) ++ leU32(x_bits) ++ leU32(r_bits);
+
+    const dumped = try dumpMutationsToString(&update, false);
+    defer std.testing.allocator.free(dumped);
+
+    try std.testing.expectEqualStrings("UPDATE id=5 propMask=position_x,color_r values=12.0000,0.2500\n", dumped);
+}
+
+test "a propless UPDATE renders propMask=none with no values" {
+    const update = [_]u8{@intFromEnum(mutations.Tag.update)} ++ leU32(5) ++ leU32(0);
+
+    const dumped = try dumpMutationsToString(&update, false);
+    defer std.testing.allocator.free(dumped);
+
+    try std.testing.expectEqualStrings("UPDATE id=5 propMask=none values=\n", dumped);
+}
+
+test "an unknown tag byte renders the marker and stops without reading out of bounds" {
+    const buffer = [_]u8{0xFF};
+    const dumped = try dumpMutationsToString(&buffer, false);
+    defer std.testing.allocator.free(dumped);
+    try std.testing.expectEqualStrings("<unknown tag 255>\n", dumped);
+}
+
+test "a truncated mutation renders the offset marker and stops without reading out of bounds" {
+    // A CREATE tag + a full id but the kind byte missing: the read past the end at byte 5.
+    const buffer = [_]u8{@intFromEnum(mutations.Tag.create)} ++ leU32(7);
+    const dumped = try dumpMutationsToString(&buffer, false);
+    defer std.testing.allocator.free(dumped);
+    try std.testing.expectEqualStrings("<truncated@5>\n", dumped);
+}
+
+test "a buffer truncated mid-id reports the field's start offset" {
+    // An APPEND tag with only two bytes of the parent id present.
+    const buffer = [_]u8{ @intFromEnum(mutations.Tag.append), 0x01, 0x00 };
+    const dumped = try dumpMutationsToString(&buffer, false);
+    defer std.testing.allocator.free(dumped);
+    try std.testing.expectEqualStrings("<truncated@1>\n", dumped);
+}
+
+test "a valid prefix decodes before a trailing truncation marker" {
+    const create = [_]u8{@intFromEnum(mutations.Tag.create)} ++ leU32(0) ++ [_]u8{@intFromEnum(tree_module.Kind.view)};
+    const truncated_remove = [_]u8{@intFromEnum(mutations.Tag.remove)} ++ [_]u8{ 0x01, 0x00 };
+    const buffer = create ++ truncated_remove;
+
+    const dumped = try dumpMutationsToString(&buffer, false);
+    defer std.testing.allocator.free(dumped);
+
+    try std.testing.expectEqualStrings(
+        "CREATE id=0 kind=view\n" ++ "<truncated@7>\n",
+        dumped,
+    );
 }
