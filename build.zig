@@ -371,7 +371,18 @@ pub fn build(b: *std.Build) void {
     const seam_test = b.addTest(.{ .name = "instance-seam-test", .root_module = seam_test_module });
     const seam_test_run = b.addRunArtifact(seam_test);
 
-    const test_step = b.step("test", "Run the Swift snapshot tests and the native Zig engine-core tests (tree, layout, measure, debug, dirty, hit_test, instances; Metal validation ON)");
+    // The Phase-15 JSC bridge: a standalone NATIVE zig test artifact (no swiftc, no
+    // metallib) for the UPPER JS↔Zig seam. It is the ONLY artifact that links the
+    // JavaScriptCore host framework, exercising the real headless engine. .Debug so
+    // the debug-only main-thread std.debug.assert is live for the confinement test.
+    // Distinct from the lower Zig↔Swift seam above — the two seams never share a file.
+    const jsc_runtime_test_module = b.createModule(.{ .root_source_file = b.path("src/core/jsc_runtime.zig"), .target = b.graph.host, .optimize = .Debug });
+    const jsc_runtime_test = b.addTest(.{ .name = "jsc-runtime-test", .root_module = jsc_runtime_test_module });
+    jsc_runtime_test.linkLibC();
+    jsc_runtime_test.linkFramework("JavaScriptCore");
+    const jsc_runtime_test_run = b.addRunArtifact(jsc_runtime_test);
+
+    const test_step = b.step("test", "Run the Swift snapshot tests and the native Zig engine-core tests (tree, layout, measure, debug, dirty, hit_test, instances, instance-seam, jsc-runtime bridge; Metal validation ON)");
     test_step.dependOn(&clear_test_run.step);
     test_step.dependOn(&sdf_test_run.step);
     test_step.dependOn(&phase3_test_run.step);
@@ -384,6 +395,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&shape_seam_test_run.step);
     test_step.dependOn(&core_test_run.step);
     test_step.dependOn(&seam_test_run.step);
+    test_step.dependOn(&jsc_runtime_test_run.step);
 }
 
 const Optimization = enum { debug, release };
